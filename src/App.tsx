@@ -166,6 +166,14 @@ export default function App() {
           },
           (connected) => {
             if (!cancelled) setIsStreamConnected(connected);
+          },
+          () => {
+            const list = candlesRef.current;
+            const anchorBar = list[Math.max(0, list.length - 48)];
+            return {
+              lastCandle: list[list.length - 1],
+              anchorOpen: anchorBar?.open,
+            };
           }
         );
       })

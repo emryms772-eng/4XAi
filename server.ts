@@ -73,6 +73,33 @@ async function startServer() {
     }
   });
 
+  app.get('/api/market/tick', async (req, res) => {
+    try {
+      const symbol =
+        typeof req.query.symbol === 'string' ? req.query.symbol : 'XAU/USD';
+      const timeframe = parseTimeframe(req.query.timeframe);
+      const parseNum = (val: unknown) =>
+        typeof val === 'string' && val !== '' && Number.isFinite(Number(val))
+          ? Number(val)
+          : undefined;
+
+      const tick = await advanceMarketTick(symbol, timeframe, {
+        lastClose: parseNum(req.query.lastClose),
+        lastTime: parseNum(req.query.lastTime),
+        lastOpen: parseNum(req.query.lastOpen),
+        lastHigh: parseNum(req.query.lastHigh),
+        lastLow: parseNum(req.query.lastLow),
+        lastVolume: parseNum(req.query.lastVolume),
+        anchorOpen: parseNum(req.query.anchorOpen),
+      });
+      res.json(tick);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Tick update failed.';
+      res.status(500).json({ error: message });
+    }
+  });
+
   app.get('/api/market/stream', async (req, res) => {
     const symbol =
       typeof req.query.symbol === 'string' ? req.query.symbol : 'XAU/USD';

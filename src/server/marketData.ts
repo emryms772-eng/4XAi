@@ -425,78 +425,112 @@ async function fetchLatestSpotPrice(symbol: string): Promise<number | null> {
   }
 }
 
+export interface TickHint {
+  lastClose?: number;
+  lastTime?: number;
+  lastOpen?: number;
+  lastHigh?: number;
+  lastLow?: number;
+  lastVolume?: number;
+  anchorOpen?: number;
+}
+
 export async function advanceMarketTick(
   symbol: string,
-  timeframe: Timeframe
+  timeframe: Timeframe,
+  hint?: TickHint
 ): Promise<MarketTickEvent> {
   const instrument = getInstrumentBySymbol(symbol);
   const cacheKey = `${instrument.symbol}:${timeframe}`;
 
-  if (!seriesCache.has(cacheKey)) {
+  if (!seriesCache.has(cacheKey) && !hint?.lastClose) {
     await getMarketCandles(instrument.symbol, timeframe, 180);
   }
 
-  const state = seriesCache.get(cacheKey)!;
+  const state = seriesCache.get(cacheKey);
   const tfSec = TIMEFRAME_SECONDS[timeframe];
   const nowSec = Math.floor(Date.now() / 1000);
   const bucketTime = getBucketTime(nowSec, tfSec);
 
-  const lastCandle = state.candles[state.candles.length - 1];
-  let nextPrice = lastCandle.close;
+  const cachedLast = state?.candles[state.candles.length - 1];
+  const baseCandle: OHLCVCandle = cachedLast ?? {
+    time: hint?.lastTime ?? bucketTime,
+    open: hint?.lastOpen ?? hint?.lastClose ?? instrument.basePrice,
+    high: hint?.lastHigh ?? hint?.lastClose ?? instrument.basePrice,
+    low: hint?.lastLow ?? hint?.lastClose ?? instrument.basePrice,
+    close: hint?.lastClose ?? instrument.basePrice,
+    volume: hint?.lastVolume ?? 250,
+  };
 
-  if (state.source === 'live-api') {
+  let nextPrice = baseCandle.close;
+  const effectiveSource: FeedOrigin = state?.source ?? 'simulated-live';
+
+  if (effectiveSource === 'live-api' || instrument.symbol === 'BTC/USD' || instrument.symbol === 'XAU/USD') {
     const liveSpot = await fetchLatestSpotPrice(instrument.symbol);
     if (liveSpot && Number.isFinite(liveSpot)) {
       nextPrice = roundPrice(liveSpot, instrument.decimals);
     } else {
-      const microVol = (instrument.volatilityBps / 10000) * 0.14;
+      const microVol = (instrument.volatilityBps / 10000) * 0.16;
       nextPrice = roundPrice(
-        lastCandle.close * (1 + (Math.random() - 0.5) * microVol),
+        baseCandle.close * (1 + (Math.random() - 0.5) * microVol),
         instrument.decimals
       );
     }
   } else {
-    // Micro-structure tick evolution with gentle mean-reversion + occasional momentum push
-    if (Math.random() < 0.04) {
+    const bias = state ? state.trendBias : (Math.random() - 0.49) * 0.00018;
+    if (state && Math.random() < 0.04) {
       state.trendBias = (Math.random() - 0.49) * 0.00025;
     }
     const tickVol = (instrument.volatilityBps / 10000) * 0.22;
-    const delta = state.trendBias + (Math.random() - 0.5) * tickVol;
-    nextPrice = roundPrice(lastCandle.close * (1 + delta), instrument.decimals);
+    const delta = bias + (Math.random() - 0.5) * tickVol;
+    nextPrice = roundPrice(baseCandle.close * (1 + delta), instrument.decimals);
   }
 
   let activeCandle: OHLCVCandle;
-  if (bucketTime > lastCandle.time) {
+  if (bucketTime > baseCandle.time) {
     activeCandle = {
       time: bucketTime,
-      open: lastCandle.close,
-      high: Math.max(lastCandle.close, nextPrice),
-      low: Math.min(lastCandle.close, nextPrice),
+      open: baseCandle.close,
+      high: Math.max(baseCandle.close, nextPrice),
+      low: Math.min(baseCandle.close, nextPrice),
       close: nextPrice,
       volume: Math.round(120 + Math.random() * 240),
     };
-    state.candles.push(activeCandle);
-    if (state.candles.length > 260) {
-      state.candles.shift();
+    if (state) {
+      state.candles.push(activeCandle);
+      if (state.candles.length > 260) {
+        state.candles.shift();
+      }
     }
   } else {
-    lastCandle.close = nextPrice;
-    lastCandle.high = roundPrice(
-      Math.max(lastCandle.high, nextPrice),
-      instrument.decimals
-    );
-    lastCandle.low = roundPrice(
-      Math.min(lastCandle.low, nextPrice),
-      instrument.decimals
-    );
-    lastCandle.volume = Math.round(lastCandle.volume + 12 + Math.random() * 38);
-    activeCandle = { ...lastCandle };
+    activeCandle = {
+      time: baseCandle.time,
+      open: baseCandle.open,
+      close: nextPrice,
+      high: roundPrice(
+        Math.max(baseCandle.high, nextPrice),
+        instrument.decimals
+      ),
+      low: roundPrice(
+        Math.min(baseCandle.low, nextPrice),
+        instrument.decimals
+      ),
+      volume: Math.round(baseCandle.volume + 12 + Math.random() * 38),
+    };
+    if (cachedLast) {
+      Object.assign(cachedLast, activeCandle);
+    }
   }
 
-  state.lastUpdatedAt = Date.now();
+  if (state) {
+    state.lastUpdatedAt = Date.now();
+  }
+
+  const anchorOpen =
+    state?.anchorOpen24h ?? hint?.anchorOpen ?? baseCandle.open;
   const spread = nextPrice * (instrument.category === 'Forex' ? 0.00012 : 0.00025);
   const changePct =
-    ((nextPrice - state.anchorOpen24h) / Math.max(state.anchorOpen24h, 1e-9)) * 100;
+    ((nextPrice - anchorOpen) / Math.max(anchorOpen, 1e-9)) * 100;
 
   return {
     symbol: instrument.symbol,
@@ -505,7 +539,7 @@ export async function advanceMarketTick(
     bid: roundPrice(nextPrice - spread / 2, instrument.decimals),
     ask: roundPrice(nextPrice + spread / 2, instrument.decimals),
     changePct: Math.round(changePct * 100) / 100,
-    source: state.source,
+    source: effectiveSource,
     candle: activeCandle,
     timestamp: Date.now(),
   };
