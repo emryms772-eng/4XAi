@@ -158,7 +158,7 @@ export function PriceActionZonesPanel({
                   type="button"
                   onClick={() => {
                     onSelectSignal(sig);
-                    onSelectSymbolTimeframe(sig.symbol, sig.timeframe);
+                    onSelectSymbolTimeframe(sig.symbol, sig.signalTimeframe);
                   }}
                   className="w-full px-5 py-3 text-left transition-colors hover:bg-slate-800/35 cursor-pointer"
                 >
@@ -184,7 +184,7 @@ export function PriceActionZonesPanel({
                         {sig.plan.signal}
                       </span>
                       <span className="text-xs font-semibold text-slate-100">
-                        {sig.symbol} · {sig.timeframe}
+                        {sig.symbol} · {sig.signalTimeframe}
                       </span>
                     </div>
 

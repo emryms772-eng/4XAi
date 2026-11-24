@@ -40,30 +40,39 @@ export default async function handler(
     };
 
     const symbol = typeof body.symbol === 'string' ? body.symbol : 'XAU/USD';
-    const timeframe = parseTimeframe(body.timeframe);
+    const activeTimeframe = parseTimeframe(body.timeframe);
     const instrument = getInstrumentBySymbol(symbol);
 
-    let candles: OHLCVCandle[] = Array.isArray(body.candles)
+    const clientCandles: OHLCVCandle[] = Array.isArray(body.candles)
       ? (body.candles as OHLCVCandle[])
       : [];
 
-    if (candles.length < 30) {
-      const loaded = await getMarketCandles(instrument.symbol, timeframe, 180);
-      candles = loaded.candles;
-    }
+    const orderedTfs: Timeframe[] = ['4H', '1H', '15M', '5M', '1M'];
+    const timeframesData = await Promise.all(
+      orderedTfs.map(async (tf) => {
+        const candles =
+          tf === activeTimeframe && clientCandles.length >= 30
+            ? clientCandles
+            : (await getMarketCandles(instrument.symbol, tf, 160)).candles;
+        return {
+          timeframe: tf,
+          candles,
+          analysis: analyzePriceAction(candles, instrument.decimals),
+        };
+      })
+    );
 
-    const priceAction = analyzePriceAction(candles, instrument.decimals);
+    const activeEntry =
+      timeframesData.find((t) => t.timeframe === activeTimeframe) ??
+      timeframesData[0];
+
     const signal = await generatePriceActionSignal({
       symbol: instrument.symbol,
-      timeframe,
-      candles,
-      snapshot: priceAction.snapshot,
-      levels: priceAction.levels,
-      zones: priceAction.zones,
-      recentPatterns: priceAction.recentPatterns,
+      activeTimeframe,
+      timeframesData,
     });
 
-    res.status(200).json({ priceAction, signal });
+    res.status(200).json({ priceAction: activeEntry.analysis, signal });
   } catch (error) {
     const message =
       error instanceof Error

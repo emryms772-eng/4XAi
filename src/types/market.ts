@@ -133,15 +133,25 @@ export interface PriceActionSignalPlan {
   confluences: string[];
 }
 
+export interface TimeframeAlignmentItem {
+  timeframe: Timeframe;
+  bias: 'Bullish' | 'Bearish' | 'Neutral';
+  structureEvent: string;
+  rangeZone: string;
+  note: string;
+}
+
 export interface AIPriceActionSignal {
   id: string;
   symbol: string;
   timeframe: Timeframe;
+  signalTimeframe: Timeframe;
   analyzedAt: string;
   model: string;
   spotPriceAtSignal: number;
   bias: 'Bullish' | 'Bearish' | 'Neutral';
   priceActionNarrative: string;
   keyZonesExplanation: string;
+  timeframeAlignment: TimeframeAlignmentItem[];
   plan: PriceActionSignalPlan;
 }

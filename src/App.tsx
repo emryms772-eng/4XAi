@@ -295,6 +295,7 @@ export default function App() {
                   isAnalyzing={isAnalyzing}
                   error={aiError}
                   onGenerateSignal={handleGenerateSignal}
+                  onSelectTimeframe={setTimeframe}
                 />
               </div>
             </div>

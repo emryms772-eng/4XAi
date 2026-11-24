@@ -17,6 +17,7 @@ interface AIAnalysisCardProps {
   isAnalyzing: boolean;
   error: string | null;
   onGenerateSignal: () => void;
+  onSelectTimeframe: (tf: Timeframe) => void;
 }
 
 export function AIAnalysisCard({
@@ -27,10 +28,14 @@ export function AIAnalysisCard({
   isAnalyzing,
   error,
   onGenerateSignal,
+  onSelectTimeframe,
 }: AIAnalysisCardProps) {
-  const isStale =
+  const isDifferentSymbol = signal !== null && signal.symbol !== symbol;
+  const recommendedTf = signal?.signalTimeframe ?? timeframe;
+  const isViewingRecommendedTf =
     signal !== null &&
-    (signal.symbol !== symbol || signal.timeframe !== timeframe);
+    signal.symbol === symbol &&
+    recommendedTf === timeframe;
 
   const signalAction = signal?.plan.signal;
   const signalColor =
@@ -50,16 +55,16 @@ export function AIAnalysisCard({
   return (
     <section
       id="setup"
-      aria-label="AI pure price-action signal engine"
+      aria-label="AI multi-timeframe pure price-action signal engine"
       className="flex flex-col rounded-lg border border-slate-800/90 bg-[#111722]"
     >
       <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 px-5 py-4">
         <div>
           <h2 className="text-sm font-semibold text-slate-50">
-            AI Price Action Signal
+            AI Multi-TF Price Action Signal
           </h2>
           <p className="mt-0.5 text-xs text-slate-400">
-            {symbol} <span aria-hidden="true">·</span> {timeframe} Pure OHLC Study
+            {symbol} <span aria-hidden="true">·</span> Scans 4H / 1H / 15M / 5M / 1M
           </p>
         </div>
 
@@ -73,7 +78,7 @@ export function AIAnalysisCard({
             className={`h-3.5 w-3.5 ${isAnalyzing ? 'animate-spin' : ''}`}
             aria-hidden="true"
           />
-          <span>{signal ? 'Refresh Signal' : 'Generate Signal'}</span>
+          <span>{signal ? 'Refresh Scan' : 'Generate Signal'}</span>
         </button>
       </div>
 
@@ -88,7 +93,7 @@ export function AIAnalysisCard({
               <div className="h-14 rounded bg-slate-800/50 animate-pulse" />
             </div>
             <p className="text-xs text-slate-400">
-              Studying raw candle sequence, BOS/CHoCH, sweeps, Order Blocks, and FVGs for {symbol}...
+              Scanning 4H, 1H, 15M, 5M, and 1M pure OHLC price action for {symbol}...
             </p>
           </div>
         )}
@@ -126,12 +131,12 @@ export function AIAnalysisCard({
             </div>
             <div className="space-y-1.5">
               <h3 className="text-sm font-semibold text-slate-100">
-                Pure Price-Action Signal Engine
+                Top-Down Price-Action Scanner
               </h3>
               <p className="mx-auto max-w-xs text-xs leading-relaxed text-slate-400">
-                Analyzes raw candlesticks, market structure breaks (BOS/CHoCH),
-                liquidity sweeps, Order Blocks, and Fair Value Gaps—without lagging
-                indicators—to generate BUY, SELL, or WAIT signals.
+                Studies all 5 timeframes (4H, 1H, 15M, 5M, 1M) using pure candle
+                structure, BOS/CHoCH, sweeps, Order Blocks, and FVGs—then pinpoints
+                which timeframe offers the cleanest BUY, SELL, or WAIT setup.
               </p>
             </div>
             <button
@@ -140,17 +145,17 @@ export function AIAnalysisCard({
               className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-500 cursor-pointer"
             >
               <Zap className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Generate Price Action Signal</span>
+              <span>Scan All Timeframes</span>
             </button>
           </div>
         )}
 
         {!isAnalyzing && signal && (
           <>
-            {isStale && (
+            {isDifferentSymbol && (
               <div className="flex items-center justify-between gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                 <span>
-                  Showing prior signal for {signal.symbol} ({signal.timeframe}).
+                  Showing prior signal for {signal.symbol} ({recommendedTf}).
                 </span>
                 <button
                   type="button"
@@ -162,7 +167,7 @@ export function AIAnalysisCard({
               </div>
             )}
 
-            {/* Primary Signal Action Header */}
+            {/* Primary Signal Action Header + Recommended Execution Timeframe */}
             <div
               className={`flex flex-wrap items-center justify-between gap-3 rounded-md border p-3.5 ${signalBannerStyle}`}
             >
@@ -185,7 +190,7 @@ export function AIAnalysisCard({
                 )}
                 <div>
                   <div className={`text-base font-bold tracking-tight ${signalColor}`}>
-                    {signalAction} SIGNAL · {signal.plan.signalStrength}
+                    {signalAction} on {recommendedTf} · {signal.plan.signalStrength}
                   </div>
                   <div className="text-xs text-slate-300">
                     {signal.plan.setupType}
@@ -207,8 +212,27 @@ export function AIAnalysisCard({
               </div>
             </div>
 
+            {!isDifferentSymbol && !isViewingRecommendedTf && (
+              <div className="flex items-center justify-between gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-200">
+                <span>
+                  Optimal setup detected on{' '}
+                  <strong className="font-mono text-blue-100">
+                    {recommendedTf}
+                  </strong>{' '}
+                  (currently viewing {timeframe}).
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onSelectTimeframe(recommendedTf)}
+                  className="font-semibold text-blue-300 underline hover:text-blue-200 whitespace-nowrap cursor-pointer"
+                >
+                  Switch to {recommendedTf}
+                </button>
+              </div>
+            )}
+
             <div className="text-xs text-slate-300">
-              <span className="text-slate-400">Trigger: </span>
+              <span className="text-slate-400">Trigger ({recommendedTf}): </span>
               <span className="font-medium text-slate-100">
                 {signal.plan.triggerPattern}
               </span>
@@ -257,11 +281,62 @@ export function AIAnalysisCard({
               </div>
             </div>
 
+            {/* Multi-Timeframe Alignment Matrix */}
+            {signal.timeframeAlignment && signal.timeframeAlignment.length > 0 && (
+              <div className="space-y-2">
+                <h3 className="text-xs font-semibold text-slate-200">
+                  Multi-Timeframe Price Action Alignment
+                </h3>
+                <div className="divide-y divide-slate-800/70 rounded-md border border-slate-800/90 bg-[#0B0F17]">
+                  {signal.timeframeAlignment.map((row) => {
+                    const isBest = row.timeframe === recommendedTf;
+                    const rowBiasColor =
+                      row.bias === 'Bullish'
+                        ? 'text-emerald-400'
+                        : row.bias === 'Bearish'
+                        ? 'text-rose-400'
+                        : 'text-amber-300';
+
+                    return (
+                      <button
+                        key={row.timeframe}
+                        type="button"
+                        onClick={() => onSelectTimeframe(row.timeframe)}
+                        className={`w-full px-3 py-2 text-left text-[11px] transition-colors hover:bg-slate-800/40 cursor-pointer ${
+                          isBest ? 'bg-blue-500/10' : ''
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-semibold text-slate-100 w-7">
+                              {row.timeframe}
+                            </span>
+                            <span className={`font-medium ${rowBiasColor}`}>
+                              {row.bias}
+                            </span>
+                            <span className="text-slate-400">
+                              · {row.structureEvent}
+                            </span>
+                          </div>
+                          <span className="text-slate-400 shrink-0">
+                            {isBest ? 'Signal TF' : row.rangeZone}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 pl-9 text-slate-400 truncate">
+                          {row.note}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Pure Price Action Reasoning */}
             <div className="space-y-3 text-xs leading-relaxed">
               <div>
                 <h3 className="font-semibold text-slate-200 mb-1">
-                  Price Action &amp; Order Flow Read
+                  Top-Down Price Action Read
                 </h3>
                 <p className="text-slate-300">{signal.priceActionNarrative}</p>
               </div>
