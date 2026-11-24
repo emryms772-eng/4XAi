@@ -78,7 +78,9 @@ export default async function handler(
       error instanceof Error
         ? error.message
         : 'Unable to generate AI price-action signal.';
-    const status = message.includes('GEMINI_API_KEY') ? 400 : 500;
+    const errStatus = (error as { statusCode?: number }).statusCode;
+    const status =
+      errStatus ?? (message.includes('GEMINI_API_KEY') ? 400 : 500);
     res.status(status).json({ error: message });
   }
 }

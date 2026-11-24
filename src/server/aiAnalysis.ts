@@ -42,6 +42,34 @@ function normalizeTimeframe(raw: string, fallback: Timeframe): Timeframe {
   return fallback;
 }
 
+function formatGeminiError(error: unknown): Error {
+  const raw = error instanceof Error ? error.message : String(error);
+
+  if (
+    raw.includes('429') ||
+    raw.includes('RESOURCE_EXHAUSTED') ||
+    raw.toLowerCase().includes('quota')
+  ) {
+    const retryMatch = raw.match(/retry in (\d+(?:\.\d+)?)s/i) ?? raw.match(/"retryDelay":"(\d+)s"/i);
+    const waitSec = retryMatch ? Math.ceil(Number(retryMatch[1])) : 30;
+    const err = new Error(
+      `Gemini Free Tier rate limit reached (5 requests/minute). Wait about ${waitSec} seconds and retry, or upgrade to a paid tier in Google AI Studio for higher quota.`
+    );
+    (err as Error & { statusCode?: number }).statusCode = 429;
+    return err;
+  }
+
+  if (raw.includes('API_KEY_INVALID') || raw.includes('PERMISSION_DENIED') || raw.includes('403')) {
+    const err = new Error(
+      'Invalid or unauthorized Gemini API key. Check your GEMINI_API_KEY in Settings > Secrets (or Vercel Environment Variables).'
+    );
+    (err as Error & { statusCode?: number }).statusCode = 403;
+    return err;
+  }
+
+  return error instanceof Error ? error : new Error(raw);
+}
+
 export async function generatePriceActionSignal(params: {
   symbol: string;
   activeTimeframe: Timeframe;
@@ -101,147 +129,152 @@ export async function generatePriceActionSignal(params: {
     'Never promise guaranteed profits.',
   ].join(' ');
 
-  const response = await ai.models.generateContent({
-    model: MODEL_NAME,
-    contents: `Analyze all 5 timeframes (1M, 5M, 15M, 1H, 4H) of pure OHLC price action and output a multi-timeframe signal:\n${JSON.stringify(
-      payload
-    )}`,
-    config: {
-      systemInstruction,
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          bias: {
-            type: Type.STRING,
-            description: 'Overall multi-timeframe bias: Bullish, Bearish, or Neutral.',
-          },
-          signalTimeframe: {
-            type: Type.STRING,
-            description:
-              'Best execution timeframe for this signal: 1M, 5M, 15M, 1H, or 4H.',
-          },
-          priceActionNarrative: {
-            type: Type.STRING,
-            description:
-              '2-3 sentences explaining top-down alignment from 4H/1H structure down to the chosen execution timeframe trigger without lagging indicators.',
-          },
-          keyZonesExplanation: {
-            type: Type.STRING,
-            description:
-              '2 sentences explaining the key HTF/LTF Order Blocks, Fair Value Gaps, liquidity pools, and S/R zones.',
-          },
-          timeframeAlignment: {
-            type: Type.ARRAY,
-            items: {
+  let response;
+  try {
+    response = await ai.models.generateContent({
+      model: MODEL_NAME,
+      contents: `Analyze all 5 timeframes (1M, 5M, 15M, 1H, 4H) of pure OHLC price action and output a multi-timeframe signal:\n${JSON.stringify(
+        payload
+      )}`,
+      config: {
+        systemInstruction,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            bias: {
+              type: Type.STRING,
+              description: 'Overall multi-timeframe bias: Bullish, Bearish, or Neutral.',
+            },
+            signalTimeframe: {
+              type: Type.STRING,
+              description:
+                'Best execution timeframe for this signal: 1M, 5M, 15M, 1H, or 4H.',
+            },
+            priceActionNarrative: {
+              type: Type.STRING,
+              description:
+                '2-3 sentences explaining top-down alignment from 4H/1H structure down to the chosen execution timeframe trigger without lagging indicators.',
+            },
+            keyZonesExplanation: {
+              type: Type.STRING,
+              description:
+                '2 sentences explaining the key HTF/LTF Order Blocks, Fair Value Gaps, liquidity pools, and S/R zones.',
+            },
+            timeframeAlignment: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  timeframe: {
+                    type: Type.STRING,
+                    description: 'Timeframe: 4H, 1H, 15M, 5M, or 1M.',
+                  },
+                  bias: {
+                    type: Type.STRING,
+                    description: 'Bullish, Bearish, or Neutral.',
+                  },
+                  structureEvent: {
+                    type: Type.STRING,
+                    description: 'Latest structure read, e.g. Bullish BOS, Bearish CHoCH, Range.',
+                  },
+                  rangeZone: {
+                    type: Type.STRING,
+                    description: 'Discount, Equilibrium, or Premium.',
+                  },
+                  note: {
+                    type: Type.STRING,
+                    description: 'Brief 4-8 word price-action takeaway for this timeframe.',
+                  },
+                },
+                required: ['timeframe', 'bias', 'structureEvent', 'rangeZone', 'note'],
+              },
+              description: 'All 5 timeframes ordered 4H, 1H, 15M, 5M, 1M.',
+            },
+            plan: {
               type: Type.OBJECT,
               properties: {
-                timeframe: {
+                signal: {
                   type: Type.STRING,
-                  description: 'Timeframe: 4H, 1H, 15M, 5M, or 1M.',
+                  description: 'Actionable signal: BUY, SELL, or WAIT.',
                 },
-                bias: {
+                signalStrength: {
                   type: Type.STRING,
-                  description: 'Bullish, Bearish, or Neutral.',
+                  description: 'A+ Setup, Standard, or Developing.',
                 },
-                structureEvent: {
+                setupType: {
                   type: Type.STRING,
-                  description: 'Latest structure read, e.g. Bullish BOS, Bearish CHoCH, Range.',
+                  description: 'Price action setup archetype.',
                 },
-                rangeZone: {
+                triggerPattern: {
                   type: Type.STRING,
-                  description: 'Discount, Equilibrium, or Premium.',
+                  description: 'Candlestick or structural trigger observed.',
                 },
-                note: {
+                entryPrice: {
+                  type: Type.NUMBER,
+                  description: 'Primary signal entry price.',
+                },
+                entryZone: {
                   type: Type.STRING,
-                  description: 'Brief 4-8 word price-action takeaway for this timeframe.',
+                  description: 'Formatted entry zone string.',
+                },
+                stopLoss: {
+                  type: Type.NUMBER,
+                  description: 'Structural invalidation stop-loss price.',
+                },
+                takeProfit1: {
+                  type: Type.NUMBER,
+                  description: 'First liquidity/structure target price.',
+                },
+                takeProfit2: {
+                  type: Type.NUMBER,
+                  description: 'Extended swing target price.',
+                },
+                riskRewardRatio: {
+                  type: Type.STRING,
+                  description: 'Risk to reward ratio, e.g. 1 : 2.6',
+                },
+                invalidationReason: {
+                  type: Type.STRING,
+                  description: 'Exact candle close or structural break invalidating the setup.',
+                },
+                confluences: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: '3 to 4 pure price-action confluences across timeframes.',
                 },
               },
-              required: ['timeframe', 'bias', 'structureEvent', 'rangeZone', 'note'],
+              required: [
+                'signal',
+                'signalStrength',
+                'setupType',
+                'triggerPattern',
+                'entryPrice',
+                'entryZone',
+                'stopLoss',
+                'takeProfit1',
+                'takeProfit2',
+                'riskRewardRatio',
+                'invalidationReason',
+                'confluences',
+              ],
             },
-            description: 'All 5 timeframes ordered 4H, 1H, 15M, 5M, 1M.',
           },
-          plan: {
-            type: Type.OBJECT,
-            properties: {
-              signal: {
-                type: Type.STRING,
-                description: 'Actionable signal: BUY, SELL, or WAIT.',
-              },
-              signalStrength: {
-                type: Type.STRING,
-                description: 'A+ Setup, Standard, or Developing.',
-              },
-              setupType: {
-                type: Type.STRING,
-                description: 'Price action setup archetype.',
-              },
-              triggerPattern: {
-                type: Type.STRING,
-                description: 'Candlestick or structural trigger observed.',
-              },
-              entryPrice: {
-                type: Type.NUMBER,
-                description: 'Primary signal entry price.',
-              },
-              entryZone: {
-                type: Type.STRING,
-                description: 'Formatted entry zone string.',
-              },
-              stopLoss: {
-                type: Type.NUMBER,
-                description: 'Structural invalidation stop-loss price.',
-              },
-              takeProfit1: {
-                type: Type.NUMBER,
-                description: 'First liquidity/structure target price.',
-              },
-              takeProfit2: {
-                type: Type.NUMBER,
-                description: 'Extended swing target price.',
-              },
-              riskRewardRatio: {
-                type: Type.STRING,
-                description: 'Risk to reward ratio, e.g. 1 : 2.6',
-              },
-              invalidationReason: {
-                type: Type.STRING,
-                description: 'Exact candle close or structural break invalidating the setup.',
-              },
-              confluences: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING },
-                description: '3 to 4 pure price-action confluences across timeframes.',
-              },
-            },
-            required: [
-              'signal',
-              'signalStrength',
-              'setupType',
-              'triggerPattern',
-              'entryPrice',
-              'entryZone',
-              'stopLoss',
-              'takeProfit1',
-              'takeProfit2',
-              'riskRewardRatio',
-              'invalidationReason',
-              'confluences',
-            ],
-          },
+          required: [
+            'bias',
+            'signalTimeframe',
+            'priceActionNarrative',
+            'keyZonesExplanation',
+            'timeframeAlignment',
+            'plan',
+          ],
         },
-        required: [
-          'bias',
-          'signalTimeframe',
-          'priceActionNarrative',
-          'keyZonesExplanation',
-          'timeframeAlignment',
-          'plan',
-        ],
       },
-    },
-  });
+    });
+  } catch (err) {
+    throw formatGeminiError(err);
+  }
 
   const rawText = (response.text ?? '').trim();
   if (!rawText) {

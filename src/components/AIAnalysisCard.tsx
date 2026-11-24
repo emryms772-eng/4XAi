@@ -99,17 +99,17 @@ export function AIAnalysisCard({
         )}
 
         {!isAnalyzing && error && (
-          <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-4 space-y-3">
-            <div className="flex items-start gap-2.5">
+          <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-4 space-y-3 overflow-hidden">
+            <div className="flex items-start gap-2.5 min-w-0">
               <AlertCircle
                 className="mt-0.5 h-4 w-4 shrink-0 text-rose-400"
                 aria-hidden="true"
               />
-              <div className="space-y-1">
+              <div className="space-y-1 min-w-0 flex-1">
                 <p className="text-xs font-semibold text-rose-300">
                   Signal Generation Failed
                 </p>
-                <p className="text-xs leading-relaxed text-rose-200/90">
+                <p className="text-xs leading-relaxed text-rose-200/90 break-words">
                   {error}
                 </p>
               </div>
