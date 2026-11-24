@@ -17,6 +17,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { TIMEFRAMES } from '../config/instruments';
 import type {
   AIPriceActionSignal,
+  DemoPosition,
   KeyLevel,
   OHLCVCandle,
   PriceActionAnalysisSummary,
@@ -31,6 +32,7 @@ interface CandlestickChartProps {
   candles: OHLCVCandle[];
   priceAction: PriceActionAnalysisSummary;
   activeSignal: AIPriceActionSignal | null;
+  openPosition?: DemoPosition | null;
   isLoading: boolean;
   onTimeframeChange: (tf: Timeframe) => void;
 }
@@ -42,6 +44,7 @@ export function CandlestickChart({
   candles,
   priceAction,
   activeSignal,
+  openPosition,
   isLoading,
   onTimeframeChange,
 }: CandlestickChartProps) {
@@ -297,6 +300,56 @@ export function CandlestickChart({
 
     if (
       showSignalLines &&
+      openPosition &&
+      openPosition.symbol === symbol
+    ) {
+      const posLines: Array<{
+        price: number;
+        color: string;
+        title: string;
+        style: LineStyle;
+      }> = [
+        {
+          price: openPosition.entryPrice,
+          color: '#3B82F6',
+          title: `Demo ${openPosition.side} Entry`,
+          style: LineStyle.Solid,
+        },
+        {
+          price: openPosition.stopLoss,
+          color: '#EF4444',
+          title: openPosition.breakevenActive ? 'Demo BE Stop' : 'Demo SL',
+          style: LineStyle.Solid,
+        },
+        {
+          price: openPosition.takeProfit1,
+          color: '#10B981',
+          title: openPosition.tp1Hit ? 'TP1 (Hit)' : 'Demo TP1',
+          style: LineStyle.Dotted,
+        },
+        {
+          price: openPosition.takeProfit2,
+          color: '#34D399',
+          title: 'Demo TP2',
+          style: LineStyle.Dotted,
+        },
+      ];
+
+      for (const item of posLines) {
+        if (Number.isFinite(item.price) && item.price > 0) {
+          const line = candleSeries.createPriceLine({
+            price: item.price,
+            color: item.color,
+            lineWidth: 2,
+            lineStyle: item.style,
+            axisLabelVisible: true,
+            title: item.title,
+          });
+          priceLinesRef.current.push(line);
+        }
+      }
+    } else if (
+      showSignalLines &&
       activeSignal &&
       activeSignal.symbol === symbol &&
       activeSignal.plan.entryPrice > 0
@@ -356,6 +409,7 @@ export function CandlestickChart({
     priceAction.zones,
     priceAction.snapshot.equilibriumPrice,
     activeSignal,
+    openPosition,
     symbol,
   ]);
 
@@ -443,7 +497,8 @@ export function CandlestickChart({
             <span>BOS / Patterns</span>
           </button>
 
-          {activeSignal && activeSignal.symbol === symbol && (
+          {((activeSignal && activeSignal.symbol === symbol) ||
+            (openPosition && openPosition.symbol === symbol)) && (
             <button
               type="button"
               onClick={() => setShowSignalLines((v) => !v)}
@@ -458,7 +513,7 @@ export function CandlestickChart({
               ) : (
                 <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
               )}
-              <span>Signal Lines</span>
+              <span>Trade Lines</span>
             </button>
           )}
 

@@ -2,13 +2,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { analyzePriceAction } from './analysis/priceAction';
 import { AIAnalysisCard } from './components/AIAnalysisCard';
 import { CandlestickChart } from './components/CandlestickChart';
+import { DemoTradingPanel } from './components/DemoTradingPanel';
 import { LivePriceHeader } from './components/LivePriceHeader';
 import { PriceActionStructureStrip } from './components/PriceActionStructureStrip';
 import { PriceActionZonesPanel } from './components/PriceActionZonesPanel';
 import { RiskDisclaimerBanner } from './components/RiskDisclaimerBanner';
-import { TopNavBar } from './components/TopNavBar';
+import { TopNavBar, type NavSectionId } from './components/TopNavBar';
 import { WatchlistSidebar } from './components/WatchlistSidebar';
-import { getInstrumentBySymbol } from './config/instruments';
+import { MARKET_INSTRUMENTS, getInstrumentBySymbol } from './config/instruments';
+import {
+  closeDemoPositionManually,
+  createInitialDemoState,
+  evaluateLiveTickOnPositions,
+  executeSignalInDemoAccount,
+  loadDemoAccountState,
+  moveStopToBreakeven,
+  saveDemoAccountState,
+} from './engine/demoBroker';
 import {
   fetchMarketCandles,
   fetchWatchlistQuotes,
@@ -17,6 +27,8 @@ import {
 } from './services/marketClient';
 import type {
   AIPriceActionSignal,
+  AutoTradeConfig,
+  DemoAccountState,
   FeedOrigin,
   OHLCVCandle,
   Timeframe,
@@ -26,9 +38,7 @@ import type {
 export default function App() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>('XAU/USD');
   const [timeframe, setTimeframe] = useState<Timeframe>('5M');
-  const [activeSection, setActiveSection] = useState<
-    'workspace' | 'levels' | 'setup' | 'risk'
-  >('workspace');
+  const [activeSection, setActiveSection] = useState<NavSectionId>('workspace');
 
   const [watchlist, setWatchlist] = useState<WatchlistQuote[]>([]);
   const [watchlistLoading, setWatchlistLoading] = useState<boolean>(true);
@@ -52,8 +62,30 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [aiError, setAiError] = useState<string | null>(null);
 
+  const [demoAccount, setDemoAccount] = useState<DemoAccountState>(() =>
+    loadDemoAccountState()
+  );
+  const [lastExecutionNote, setLastExecutionNote] = useState<string | null>(
+    null
+  );
+  const [nextScanSecondsLeft, setNextScanSecondsLeft] = useState<number | null>(
+    null
+  );
+
   const candlesRef = useRef<OHLCVCandle[]>([]);
   candlesRef.current = candles;
+  const watchlistRef = useRef<WatchlistQuote[]>([]);
+  watchlistRef.current = watchlist;
+  const livePriceRef = useRef<number>(0);
+  livePriceRef.current = livePrice;
+  const isAnalyzingRef = useRef<boolean>(false);
+  isAnalyzingRef.current = isAnalyzing;
+  const scanCursorRef = useRef<number>(0);
+
+  // Persist demo account updates
+  useEffect(() => {
+    saveDemoAccountState(demoAccount);
+  }, [demoAccount]);
 
   const instrument = useMemo(
     () => getInstrumentBySymbol(selectedSymbol),
@@ -63,6 +95,12 @@ export default function App() {
   const priceAction = useMemo(
     () => analyzePriceAction(candles, instrument.decimals),
     [candles, instrument.decimals]
+  );
+
+  const openPositionForSymbol = useMemo(
+    () =>
+      demoAccount.openPositions.find((p) => p.symbol === selectedSymbol) ?? null,
+    [demoAccount.openPositions, selectedSymbol]
   );
 
   const sessionStats = useMemo(() => {
@@ -76,16 +114,28 @@ export default function App() {
     };
   }, [candles, instrument.basePrice]);
 
-  // Initial & periodic watchlist fetch
+  // Initial & periodic watchlist fetch + evaluate open positions on non-selected pairs
   useEffect(() => {
     let active = true;
     const loadWatchlist = async () => {
       try {
         const quotes = await fetchWatchlistQuotes();
-        if (active) {
-          setWatchlist(quotes);
-          setWatchlistLoading(false);
-        }
+        if (!active) return;
+        setWatchlist(quotes);
+        setWatchlistLoading(false);
+
+        setDemoAccount((prev) => {
+          let updated = prev;
+          let note: string | null = null;
+          for (const q of quotes) {
+            if (q.symbol === selectedSymbol) continue;
+            const res = evaluateLiveTickOnPositions(updated, q.symbol, q.price);
+            updated = res.nextState;
+            if (res.eventMessage) note = res.eventMessage;
+          }
+          if (note) setLastExecutionNote(note);
+          return updated;
+        });
       } catch {
         if (active) setWatchlistLoading(false);
       }
@@ -96,9 +146,9 @@ export default function App() {
       active = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [selectedSymbol]);
 
-  // Load historical candles & connect live SSE stream on symbol/timeframe change
+  // Load historical candles & connect live tick stream on symbol/timeframe change
   useEffect(() => {
     let cancelled = false;
     let unsubscribe: (() => void) | null = null;
@@ -163,6 +213,19 @@ export default function App() {
                   : q
               )
             );
+
+            // Evaluate Demo Account SL, TP1+Breakeven, TP2, and live floating P&L on every tick
+            setDemoAccount((prev) => {
+              const res = evaluateLiveTickOnPositions(
+                prev,
+                tick.symbol,
+                tick.price
+              );
+              if (res.eventMessage) {
+                setLastExecutionNote(res.eventMessage);
+              }
+              return res.nextState;
+            });
           },
           (connected) => {
             if (!cancelled) setIsStreamConnected(connected);
@@ -191,29 +254,150 @@ export default function App() {
     };
   }, [selectedSymbol, timeframe, instrument.category]);
 
-  const handleGenerateSignal = useCallback(async () => {
-    setIsAnalyzing(true);
-    setAiError(null);
-    try {
-      const result = await requestPriceActionSignal({
-        symbol: selectedSymbol,
-        timeframe,
-        candles: candlesRef.current,
-      });
-      setActiveSignal(result.signal);
-      setSignalHistory((prev) => [result.signal, ...prev].slice(0, 12));
-    } catch (err) {
-      setAiError(
-        err instanceof Error
-          ? err.message
-          : 'Failed to generate AI price-action signal.'
-      );
-    } finally {
-      setIsAnalyzing(false);
-    }
-  }, [selectedSymbol, timeframe]);
+  const handleExecuteSignalOnDemo = useCallback(
+    (signal: AIPriceActionSignal, spotOverride?: number) => {
+      const spot =
+        spotOverride ??
+        (signal.symbol === selectedSymbol
+          ? livePriceRef.current || signal.spotPriceAtSignal
+          : watchlistRef.current.find((q) => q.symbol === signal.symbol)?.price ??
+            signal.spotPriceAtSignal);
 
-  const handleNavigate = (section: 'workspace' | 'levels' | 'setup' | 'risk') => {
+      setDemoAccount((prev) => {
+        const res = executeSignalInDemoAccount(prev, signal, spot);
+        setLastExecutionNote(res.actionSummary);
+        return res.nextState;
+      });
+    },
+    [selectedSymbol]
+  );
+
+  const runSignalScan = useCallback(
+    async (targetSymbol: string, targetTimeframe: Timeframe) => {
+      if (isAnalyzingRef.current) return;
+      setIsAnalyzing(true);
+      setAiError(null);
+
+      try {
+        let scanCandles: OHLCVCandle[] = [];
+        let spotForSymbol = livePriceRef.current;
+
+        if (
+          targetSymbol === selectedSymbol &&
+          targetTimeframe === timeframe &&
+          candlesRef.current.length >= 30
+        ) {
+          scanCandles = candlesRef.current;
+        } else {
+          const loaded = await fetchMarketCandles(
+            targetSymbol,
+            targetTimeframe,
+            180
+          );
+          scanCandles = loaded.candles;
+          spotForSymbol =
+            scanCandles[scanCandles.length - 1]?.close ?? spotForSymbol;
+        }
+
+        const result = await requestPriceActionSignal({
+          symbol: targetSymbol,
+          timeframe: targetTimeframe,
+          candles: scanCandles,
+        });
+
+        setActiveSignal(result.signal);
+        setSignalHistory((prev) => [result.signal, ...prev].slice(0, 15));
+
+        setDemoAccount((prev) => {
+          if (!prev.config.autoTradeEnabled) return prev;
+          const res = executeSignalInDemoAccount(
+            prev,
+            result.signal,
+            spotForSymbol || result.signal.spotPriceAtSignal
+          );
+          setLastExecutionNote(res.actionSummary);
+          return res.nextState;
+        });
+      } catch (err) {
+        setAiError(
+          err instanceof Error
+            ? err.message
+            : 'Failed to generate AI price-action signal.'
+        );
+      } finally {
+        setIsAnalyzing(false);
+      }
+    },
+    [selectedSymbol, timeframe]
+  );
+
+  const handleGenerateSignal = useCallback(() => {
+    void runSignalScan(selectedSymbol, timeframe);
+  }, [runSignalScan, selectedSymbol, timeframe]);
+
+  // Autonomous Auto-Scan Timer Loop
+  useEffect(() => {
+    const intervalSec = demoAccount.config.autoScanIntervalSec;
+    if (intervalSec <= 0) {
+      setNextScanSecondsLeft(null);
+      return;
+    }
+
+    let remaining = intervalSec;
+    setNextScanSecondsLeft(remaining);
+
+    const tickTimer = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        remaining = intervalSec;
+        if (!isAnalyzingRef.current) {
+          let targetSym = selectedSymbol;
+          if (demoAccount.config.scanScope === 'watchlist') {
+            const idx = scanCursorRef.current % MARKET_INSTRUMENTS.length;
+            targetSym = MARKET_INSTRUMENTS[idx].symbol;
+            scanCursorRef.current += 1;
+          }
+          void runSignalScan(targetSym, timeframe);
+        }
+      }
+      setNextScanSecondsLeft(remaining);
+    }, 1000);
+
+    return () => clearInterval(tickTimer);
+  }, [
+    demoAccount.config.autoScanIntervalSec,
+    demoAccount.config.scanScope,
+    selectedSymbol,
+    timeframe,
+    runSignalScan,
+  ]);
+
+  const handleUpdateConfig = useCallback((patch: Partial<AutoTradeConfig>) => {
+    setDemoAccount((prev) => ({
+      ...prev,
+      config: { ...prev.config, ...patch },
+    }));
+  }, []);
+
+  const handleClosePosition = useCallback((positionId: string) => {
+    setDemoAccount((prev) => closeDemoPositionManually(prev, positionId));
+    setLastExecutionNote('Closed demo position manually at market.');
+  }, []);
+
+  const handleMoveToBreakeven = useCallback((positionId: string) => {
+    setDemoAccount((prev) => moveStopToBreakeven(prev, positionId));
+    setLastExecutionNote('Moved demo position Stop Loss to Entry (Breakeven).');
+  }, []);
+
+  const handleResetDemoAccount = useCallback(() => {
+    setDemoAccount((prev) => ({
+      ...createInitialDemoState(),
+      config: prev.config,
+    }));
+    setLastExecutionNote('Demo account balance reset to $10,000.00.');
+  }, []);
+
+  const handleNavigate = (section: NavSectionId) => {
     setActiveSection(section);
     const target = document.getElementById(section);
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -276,6 +460,7 @@ export default function App() {
                   candles={candles}
                   priceAction={priceAction}
                   activeSignal={activeSignal}
+                  openPosition={openPositionForSymbol}
                   isLoading={candlesLoading}
                   onTimeframeChange={setTimeframe}
                 />
@@ -296,9 +481,27 @@ export default function App() {
                   error={aiError}
                   onGenerateSignal={handleGenerateSignal}
                   onSelectTimeframe={setTimeframe}
+                  onExecuteOnDemo={(sig) => handleExecuteSignalOnDemo(sig)}
                 />
               </div>
             </div>
+
+            <DemoTradingPanel
+              demoAccount={demoAccount}
+              activeSignal={activeSignal}
+              selectedSymbol={selectedSymbol}
+              nextScanSecondsLeft={nextScanSecondsLeft}
+              lastExecutionNote={lastExecutionNote}
+              onUpdateConfig={handleUpdateConfig}
+              onExecuteSignal={(sig) => handleExecuteSignalOnDemo(sig)}
+              onClosePosition={handleClosePosition}
+              onMoveToBreakeven={handleMoveToBreakeven}
+              onResetAccount={handleResetDemoAccount}
+              onSelectSymbol={(sym) => {
+                setSelectedSymbol(sym);
+                setAiError(null);
+              }}
+            />
 
             <PriceActionZonesPanel
               symbol={selectedSymbol}

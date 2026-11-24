@@ -1,8 +1,10 @@
 import { Loader2, Zap } from 'lucide-react';
 
+export type NavSectionId = 'workspace' | 'demo' | 'levels' | 'setup' | 'risk';
+
 interface TopNavBarProps {
-  activeSection: 'workspace' | 'levels' | 'setup' | 'risk';
-  onNavigate: (section: 'workspace' | 'levels' | 'setup' | 'risk') => void;
+  activeSection: NavSectionId;
+  onNavigate: (section: NavSectionId) => void;
   onGenerateSignal: () => void;
   isAnalyzing: boolean;
 }
@@ -13,11 +15,9 @@ export function TopNavBar({
   onGenerateSignal,
   isAnalyzing,
 }: TopNavBarProps) {
-  const navItems: Array<{
-    id: 'workspace' | 'levels' | 'setup' | 'risk';
-    label: string;
-  }> = [
+  const navItems: Array<{ id: NavSectionId; label: string }> = [
     { id: 'workspace', label: 'Price Chart' },
+    { id: 'demo', label: 'Demo Desk' },
     { id: 'levels', label: 'Zones & Log' },
     { id: 'setup', label: 'AI Signal' },
     { id: 'risk', label: 'Risk Notice' },

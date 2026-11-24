@@ -18,6 +18,7 @@ interface AIAnalysisCardProps {
   error: string | null;
   onGenerateSignal: () => void;
   onSelectTimeframe: (tf: Timeframe) => void;
+  onExecuteOnDemo?: (signal: AIPriceActionSignal) => void;
 }
 
 export function AIAnalysisCard({
@@ -29,6 +30,7 @@ export function AIAnalysisCard({
   error,
   onGenerateSignal,
   onSelectTimeframe,
+  onExecuteOnDemo,
 }: AIAnalysisCardProps) {
   const isDifferentSymbol = signal !== null && signal.symbol !== symbol;
   const recommendedTf = signal?.signalTimeframe ?? timeframe;
@@ -242,6 +244,16 @@ export function AIAnalysisCard({
                 {signal.model}
               </span>
             </div>
+
+            {onExecuteOnDemo && signal.plan.signal !== 'WAIT' && (
+              <button
+                type="button"
+                onClick={() => onExecuteOnDemo(signal)}
+                className="w-full rounded-md border border-blue-500/40 bg-blue-600/15 py-2 text-xs font-semibold text-blue-200 transition-colors hover:bg-blue-600/25 cursor-pointer"
+              >
+                Place {signal.plan.signal} Order on Demo Account
+              </button>
+            )}
 
             {/* Signal Execution Levels */}
             <div className="grid grid-cols-2 gap-3">

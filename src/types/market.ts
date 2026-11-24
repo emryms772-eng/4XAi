@@ -155,3 +155,64 @@ export interface AIPriceActionSignal {
   timeframeAlignment: TimeframeAlignmentItem[];
   plan: PriceActionSignalPlan;
 }
+
+export type AutoScanIntervalSec = 0 | 60 | 180 | 300;
+export type AutoScanScope = 'active' | 'watchlist';
+
+export interface AutoTradeConfig {
+  autoTradeEnabled: boolean;
+  autoScanIntervalSec: AutoScanIntervalSec;
+  scanScope: AutoScanScope;
+  riskPercentPerTrade: 0.5 | 1 | 2;
+}
+
+export interface DemoPosition {
+  id: string;
+  signalId: string;
+  symbol: string;
+  timeframe: Timeframe;
+  side: 'BUY' | 'SELL';
+  entryPrice: number;
+  currentPrice: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  initialUnits: number;
+  remainingUnits: number;
+  tp1Hit: boolean;
+  breakevenActive: boolean;
+  realizedPartialPnl: number;
+  unrealizedPnl: number;
+  openedAt: string;
+  setupType: string;
+}
+
+export type TradeCloseReason =
+  | 'TP2 Hit'
+  | 'Stop Loss'
+  | 'Breakeven Stop'
+  | 'Signal Reversal'
+  | 'Manual Close';
+
+export interface ClosedDemoTrade {
+  id: string;
+  symbol: string;
+  timeframe: Timeframe;
+  side: 'BUY' | 'SELL';
+  entryPrice: number;
+  exitPrice: number;
+  units: number;
+  realizedPnl: number;
+  reason: TradeCloseReason;
+  openedAt: string;
+  closedAt: string;
+}
+
+export interface DemoAccountState {
+  initialBalance: number;
+  balance: number;
+  openPositions: DemoPosition[];
+  closedTrades: ClosedDemoTrade[];
+  config: AutoTradeConfig;
+}
+
