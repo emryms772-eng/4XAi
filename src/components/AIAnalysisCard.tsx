@@ -231,10 +231,15 @@ export function AIAnalysisCard({
               </div>
             )}
 
-            <div className="text-xs text-slate-300">
-              <span className="text-slate-400">Trigger ({recommendedTf}): </span>
-              <span className="font-medium text-slate-100">
-                {signal.plan.triggerPattern}
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300">
+              <div>
+                <span className="text-slate-400">Trigger ({recommendedTf}): </span>
+                <span className="font-medium text-slate-100">
+                  {signal.plan.triggerPattern}
+                </span>
+              </div>
+              <span className="font-mono text-[11px] text-slate-400">
+                {signal.model}
               </span>
             </div>
 

@@ -8,16 +8,31 @@ import type {
   TimeframeAlignmentItem,
 } from '../types/market.ts';
 
-const MODEL_NAME = 'gemini-4-hydrogen';
+const PRIMARY_MODEL = 'gemini-4-hydrogen';
+const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+const GROQ_FALLBACK_MODEL = 'llama-3.3-70b-versatile';
+const SIGNAL_CACHE_TTL_MS = 20_000;
 
-function getGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
-    throw new Error(
-      'GEMINI_API_KEY is not configured. Add a valid key in Settings > Secrets (or Vercel Environment Variables) to generate AI price-action signals.'
-    );
-  }
+interface CachedSignalEntry {
+  createdAt: number;
+  signal: AIPriceActionSignal;
+}
 
+const signalCache = new Map<string, CachedSignalEntry>();
+
+function getGeminiApiKey(): string | null {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key || key === 'MY_GEMINI_API_KEY') return null;
+  return key;
+}
+
+function getGroqApiKey(): string | null {
+  const key = process.env.GROQ_API_KEY;
+  if (!key || key === 'MY_GROQ_API_KEY') return null;
+  return key;
+}
+
+function createGeminiClient(apiKey: string): GoogleGenAI {
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
@@ -42,24 +57,36 @@ function normalizeTimeframe(raw: string, fallback: Timeframe): Timeframe {
   return fallback;
 }
 
-function formatGeminiError(error: unknown): Error {
+function isQuotaError(error: unknown): boolean {
   const raw = error instanceof Error ? error.message : String(error);
-
-  if (
+  return (
     raw.includes('429') ||
     raw.includes('RESOURCE_EXHAUSTED') ||
-    raw.toLowerCase().includes('quota')
-  ) {
-    const retryMatch = raw.match(/retry in (\d+(?:\.\d+)?)s/i) ?? raw.match(/"retryDelay":"(\d+)s"/i);
+    raw.toLowerCase().includes('quota') ||
+    raw.toLowerCase().includes('rate limit')
+  );
+}
+
+function formatProviderError(error: unknown): Error {
+  const raw = error instanceof Error ? error.message : String(error);
+
+  if (isQuotaError(error)) {
+    const retryMatch =
+      raw.match(/retry in (\d+(?:\.\d+)?)s/i) ??
+      raw.match(/"retryDelay":"(\d+)s"/i);
     const waitSec = retryMatch ? Math.ceil(Number(retryMatch[1])) : 30;
     const err = new Error(
-      `Gemini Free Tier rate limit reached (5 requests/minute). Wait about ${waitSec} seconds and retry, or upgrade to a paid tier in Google AI Studio for higher quota.`
+      `Free Tier rate limit reached across Gemini models. Wait about ${waitSec} seconds and retry, add a GROQ_API_KEY backup variable, or upgrade billing in Google AI Studio.`
     );
     (err as Error & { statusCode?: number }).statusCode = 429;
     return err;
   }
 
-  if (raw.includes('API_KEY_INVALID') || raw.includes('PERMISSION_DENIED') || raw.includes('403')) {
+  if (
+    raw.includes('API_KEY_INVALID') ||
+    raw.includes('PERMISSION_DENIED') ||
+    raw.includes('403')
+  ) {
     const err = new Error(
       'Invalid or unauthorized Gemini API key. Check your GEMINI_API_KEY in Settings > Secrets (or Vercel Environment Variables).'
     );
@@ -70,6 +97,240 @@ function formatGeminiError(error: unknown): Error {
   return error instanceof Error ? error : new Error(raw);
 }
 
+interface RawSignalJSON {
+  bias: 'Bullish' | 'Bearish' | 'Neutral';
+  signalTimeframe: string;
+  priceActionNarrative: string;
+  keyZonesExplanation: string;
+  timeframeAlignment: TimeframeAlignmentItem[];
+  plan: AIPriceActionSignal['plan'];
+}
+
+async function runGeminiModel(
+  ai: GoogleGenAI,
+  model: string,
+  systemInstruction: string,
+  payloadJson: string
+): Promise<RawSignalJSON> {
+  const response = await ai.models.generateContent({
+    model,
+    contents: `Analyze all 5 timeframes (1M, 5M, 15M, 1H, 4H) of pure OHLC price action and output a multi-timeframe signal:\n${payloadJson}`,
+    config: {
+      systemInstruction,
+      ...(model === PRIMARY_MODEL
+        ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+        : {}),
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          bias: {
+            type: Type.STRING,
+            description: 'Overall multi-timeframe bias: Bullish, Bearish, or Neutral.',
+          },
+          signalTimeframe: {
+            type: Type.STRING,
+            description:
+              'Best execution timeframe for this signal: 1M, 5M, 15M, 1H, or 4H.',
+          },
+          priceActionNarrative: {
+            type: Type.STRING,
+            description:
+              '2-3 sentences explaining top-down alignment from 4H/1H structure down to the chosen execution timeframe trigger without lagging indicators.',
+          },
+          keyZonesExplanation: {
+            type: Type.STRING,
+            description:
+              '2 sentences explaining the key HTF/LTF Order Blocks, Fair Value Gaps, liquidity pools, and S/R zones.',
+          },
+          timeframeAlignment: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                timeframe: {
+                  type: Type.STRING,
+                  description: 'Timeframe: 4H, 1H, 15M, 5M, or 1M.',
+                },
+                bias: {
+                  type: Type.STRING,
+                  description: 'Bullish, Bearish, or Neutral.',
+                },
+                structureEvent: {
+                  type: Type.STRING,
+                  description:
+                    'Latest structure read, e.g. Bullish BOS, Bearish CHoCH, Range.',
+                },
+                rangeZone: {
+                  type: Type.STRING,
+                  description: 'Discount, Equilibrium, or Premium.',
+                },
+                note: {
+                  type: Type.STRING,
+                  description:
+                    'Brief 4-8 word price-action takeaway for this timeframe.',
+                },
+              },
+              required: ['timeframe', 'bias', 'structureEvent', 'rangeZone', 'note'],
+            },
+            description: 'All 5 timeframes ordered 4H, 1H, 15M, 5M, 1M.',
+          },
+          plan: {
+            type: Type.OBJECT,
+            properties: {
+              signal: {
+                type: Type.STRING,
+                description: 'Actionable signal: BUY, SELL, or WAIT.',
+              },
+              signalStrength: {
+                type: Type.STRING,
+                description: 'A+ Setup, Standard, or Developing.',
+              },
+              setupType: {
+                type: Type.STRING,
+                description: 'Price action setup archetype.',
+              },
+              triggerPattern: {
+                type: Type.STRING,
+                description: 'Candlestick or structural trigger observed.',
+              },
+              entryPrice: {
+                type: Type.NUMBER,
+                description: 'Primary signal entry price.',
+              },
+              entryZone: {
+                type: Type.STRING,
+                description: 'Formatted entry zone string.',
+              },
+              stopLoss: {
+                type: Type.NUMBER,
+                description: 'Structural invalidation stop-loss price.',
+              },
+              takeProfit1: {
+                type: Type.NUMBER,
+                description: 'First liquidity/structure target price.',
+              },
+              takeProfit2: {
+                type: Type.NUMBER,
+                description: 'Extended swing target price.',
+              },
+              riskRewardRatio: {
+                type: Type.STRING,
+                description: 'Risk to reward ratio, e.g. 1 : 2.6',
+              },
+              invalidationReason: {
+                type: Type.STRING,
+                description:
+                  'Exact candle close or structural break invalidating the setup.',
+              },
+              confluences: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+                description:
+                  '3 to 4 pure price-action confluences across timeframes.',
+              },
+            },
+            required: [
+              'signal',
+              'signalStrength',
+              'setupType',
+              'triggerPattern',
+              'entryPrice',
+              'entryZone',
+              'stopLoss',
+              'takeProfit1',
+              'takeProfit2',
+              'riskRewardRatio',
+              'invalidationReason',
+              'confluences',
+            ],
+          },
+        },
+        required: [
+          'bias',
+          'signalTimeframe',
+          'priceActionNarrative',
+          'keyZonesExplanation',
+          'timeframeAlignment',
+          'plan',
+        ],
+      },
+    },
+  });
+
+  const rawText = (response.text ?? '').trim();
+  if (!rawText) {
+    throw new Error(`Model ${model} returned an empty response.`);
+  }
+  return JSON.parse(rawText) as RawSignalJSON;
+}
+
+async function runGroqFallback(
+  groqApiKey: string,
+  systemInstruction: string,
+  payloadJson: string
+): Promise<RawSignalJSON> {
+  const schemaPrompt = `${systemInstruction}
+
+Return ONLY valid JSON matching this exact shape:
+{
+  "bias": "Bullish" | "Bearish" | "Neutral",
+  "signalTimeframe": "4H" | "1H" | "15M" | "5M" | "1M",
+  "priceActionNarrative": "string",
+  "keyZonesExplanation": "string",
+  "timeframeAlignment": [
+    { "timeframe": "4H"|"1H"|"15M"|"5M"|"1M", "bias": "Bullish"|"Bearish"|"Neutral", "structureEvent": "string", "rangeZone": "Discount"|"Equilibrium"|"Premium", "note": "string" }
+  ],
+  "plan": {
+    "signal": "BUY" | "SELL" | "WAIT",
+    "signalStrength": "A+ Setup" | "Standard" | "Developing",
+    "setupType": "string",
+    "triggerPattern": "string",
+    "entryPrice": number,
+    "entryZone": "string",
+    "stopLoss": number,
+    "takeProfit1": number,
+    "takeProfit2": number,
+    "riskRewardRatio": "string",
+    "invalidationReason": "string",
+    "confluences": ["string", "string", "string"]
+  }
+}`;
+
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${groqApiKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_FALLBACK_MODEL,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: schemaPrompt },
+        {
+          role: 'user',
+          content: `Analyze all 5 timeframes (1M, 5M, 15M, 1H, 4H) of pure OHLC price action:\n${payloadJson}`,
+        },
+      ],
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Groq fallback failed (${res.status}): ${errText}`);
+  }
+
+  const json = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  const content = json.choices?.[0]?.message?.content?.trim();
+  if (!content) {
+    throw new Error('Groq returned an empty price-action signal response.');
+  }
+  return JSON.parse(content) as RawSignalJSON;
+}
+
 export async function generatePriceActionSignal(params: {
   symbol: string;
   activeTimeframe: Timeframe;
@@ -77,7 +338,23 @@ export async function generatePriceActionSignal(params: {
 }): Promise<AIPriceActionSignal> {
   const { symbol, activeTimeframe, timeframesData } = params;
   const instrument = getInstrumentBySymbol(symbol);
-  const ai = getGeminiClient();
+
+  const cached = signalCache.get(instrument.symbol);
+  if (cached && Date.now() - cached.createdAt < SIGNAL_CACHE_TTL_MS) {
+    return {
+      ...cached.signal,
+      timeframe: activeTimeframe,
+    };
+  }
+
+  const geminiKey = getGeminiApiKey();
+  const groqKey = getGroqApiKey();
+
+  if (!geminiKey && !groqKey) {
+    throw new Error(
+      'No AI API key configured. Add GEMINI_API_KEY (or optional GROQ_API_KEY) in Settings > Secrets or Vercel Environment Variables.'
+    );
+  }
 
   const activeEntry =
     timeframesData.find((t) => t.timeframe === activeTimeframe) ??
@@ -87,23 +364,24 @@ export async function generatePriceActionSignal(params: {
     activeEntry.candles[activeEntry.candles.length - 1]?.close ??
     instrument.basePrice;
 
-  // Provide top-down summary for all 5 timeframes + raw OHLC sequences for 4H, 1H, 15M, 5M, 1M
   const multiTimeframeContext = timeframesData.map((tfItem) => ({
     timeframe: tfItem.timeframe,
     structure: tfItem.analysis.snapshot,
     supportResistanceLevels: tfItem.analysis.levels.slice(0, 4),
     imbalancesAndOrderBlocks: tfItem.analysis.zones.slice(0, 4),
     recentCandlestickPatterns: tfItem.analysis.recentPatterns.slice(0, 4),
-    recentOHLC: tfItem.candles.slice(tfItem.timeframe === activeTimeframe ? -24 : -12).map((c) => ({
-      t: new Date(c.time * 1000).toISOString().slice(11, 16),
-      o: c.open,
-      h: c.high,
-      l: c.low,
-      c: c.close,
-    })),
+    recentOHLC: tfItem.candles
+      .slice(tfItem.timeframe === activeTimeframe ? -24 : -12)
+      .map((c) => ({
+        t: new Date(c.time * 1000).toISOString().slice(11, 16),
+        o: c.open,
+        h: c.high,
+        l: c.low,
+        c: c.close,
+      })),
   }));
 
-  const payload = {
+  const payloadJson = JSON.stringify({
     instrument: {
       symbol: instrument.symbol,
       name: instrument.name,
@@ -113,7 +391,7 @@ export async function generatePriceActionSignal(params: {
     activeChartTimeframe: activeTimeframe,
     currentPrice,
     multiTimeframePriceAction: multiTimeframeContext,
-  };
+  });
 
   const systemInstruction = [
     'You are an institutional top-down multi-timeframe pure price-action analyst.',
@@ -129,179 +407,63 @@ export async function generatePriceActionSignal(params: {
     'Never promise guaranteed profits.',
   ].join(' ');
 
-  let response;
-  try {
-    response = await ai.models.generateContent({
-      model: MODEL_NAME,
-      contents: `Analyze all 5 timeframes (1M, 5M, 15M, 1H, 4H) of pure OHLC price action and output a multi-timeframe signal:\n${JSON.stringify(
-        payload
-      )}`,
-      config: {
+  let parsed: RawSignalJSON | null = null;
+  let usedModel = PRIMARY_MODEL;
+  let lastError: unknown = null;
+
+  if (geminiKey) {
+    const ai = createGeminiClient(geminiKey);
+    try {
+      parsed = await runGeminiModel(
+        ai,
+        PRIMARY_MODEL,
         systemInstruction,
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            bias: {
-              type: Type.STRING,
-              description: 'Overall multi-timeframe bias: Bullish, Bearish, or Neutral.',
-            },
-            signalTimeframe: {
-              type: Type.STRING,
-              description:
-                'Best execution timeframe for this signal: 1M, 5M, 15M, 1H, or 4H.',
-            },
-            priceActionNarrative: {
-              type: Type.STRING,
-              description:
-                '2-3 sentences explaining top-down alignment from 4H/1H structure down to the chosen execution timeframe trigger without lagging indicators.',
-            },
-            keyZonesExplanation: {
-              type: Type.STRING,
-              description:
-                '2 sentences explaining the key HTF/LTF Order Blocks, Fair Value Gaps, liquidity pools, and S/R zones.',
-            },
-            timeframeAlignment: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  timeframe: {
-                    type: Type.STRING,
-                    description: 'Timeframe: 4H, 1H, 15M, 5M, or 1M.',
-                  },
-                  bias: {
-                    type: Type.STRING,
-                    description: 'Bullish, Bearish, or Neutral.',
-                  },
-                  structureEvent: {
-                    type: Type.STRING,
-                    description: 'Latest structure read, e.g. Bullish BOS, Bearish CHoCH, Range.',
-                  },
-                  rangeZone: {
-                    type: Type.STRING,
-                    description: 'Discount, Equilibrium, or Premium.',
-                  },
-                  note: {
-                    type: Type.STRING,
-                    description: 'Brief 4-8 word price-action takeaway for this timeframe.',
-                  },
-                },
-                required: ['timeframe', 'bias', 'structureEvent', 'rangeZone', 'note'],
-              },
-              description: 'All 5 timeframes ordered 4H, 1H, 15M, 5M, 1M.',
-            },
-            plan: {
-              type: Type.OBJECT,
-              properties: {
-                signal: {
-                  type: Type.STRING,
-                  description: 'Actionable signal: BUY, SELL, or WAIT.',
-                },
-                signalStrength: {
-                  type: Type.STRING,
-                  description: 'A+ Setup, Standard, or Developing.',
-                },
-                setupType: {
-                  type: Type.STRING,
-                  description: 'Price action setup archetype.',
-                },
-                triggerPattern: {
-                  type: Type.STRING,
-                  description: 'Candlestick or structural trigger observed.',
-                },
-                entryPrice: {
-                  type: Type.NUMBER,
-                  description: 'Primary signal entry price.',
-                },
-                entryZone: {
-                  type: Type.STRING,
-                  description: 'Formatted entry zone string.',
-                },
-                stopLoss: {
-                  type: Type.NUMBER,
-                  description: 'Structural invalidation stop-loss price.',
-                },
-                takeProfit1: {
-                  type: Type.NUMBER,
-                  description: 'First liquidity/structure target price.',
-                },
-                takeProfit2: {
-                  type: Type.NUMBER,
-                  description: 'Extended swing target price.',
-                },
-                riskRewardRatio: {
-                  type: Type.STRING,
-                  description: 'Risk to reward ratio, e.g. 1 : 2.6',
-                },
-                invalidationReason: {
-                  type: Type.STRING,
-                  description: 'Exact candle close or structural break invalidating the setup.',
-                },
-                confluences: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: '3 to 4 pure price-action confluences across timeframes.',
-                },
-              },
-              required: [
-                'signal',
-                'signalStrength',
-                'setupType',
-                'triggerPattern',
-                'entryPrice',
-                'entryZone',
-                'stopLoss',
-                'takeProfit1',
-                'takeProfit2',
-                'riskRewardRatio',
-                'invalidationReason',
-                'confluences',
-              ],
-            },
-          },
-          required: [
-            'bias',
-            'signalTimeframe',
-            'priceActionNarrative',
-            'keyZonesExplanation',
-            'timeframeAlignment',
-            'plan',
-          ],
-        },
-      },
-    });
-  } catch (err) {
-    throw formatGeminiError(err);
+        payloadJson
+      );
+      usedModel = PRIMARY_MODEL;
+    } catch (err) {
+      lastError = err;
+      if (isQuotaError(err)) {
+        try {
+          parsed = await runGeminiModel(
+            ai,
+            FALLBACK_MODEL,
+            systemInstruction,
+            payloadJson
+          );
+          usedModel = FALLBACK_MODEL;
+        } catch (fallbackErr) {
+          lastError = fallbackErr;
+        }
+      }
+    }
   }
 
-  const rawText = (response.text ?? '').trim();
-  if (!rawText) {
-    throw new Error('Gemini returned an empty price-action signal response.');
+  if (!parsed && groqKey && (lastError === null || isQuotaError(lastError))) {
+    try {
+      parsed = await runGroqFallback(groqKey, systemInstruction, payloadJson);
+      usedModel = GROQ_FALLBACK_MODEL;
+    } catch (groqErr) {
+      lastError = groqErr;
+    }
   }
 
-  const parsed = JSON.parse(rawText) as {
-    bias: 'Bullish' | 'Bearish' | 'Neutral';
-    signalTimeframe: string;
-    priceActionNarrative: string;
-    keyZonesExplanation: string;
-    timeframeAlignment: TimeframeAlignmentItem[];
-    plan: AIPriceActionSignal['plan'];
-  };
+  if (!parsed) {
+    throw formatProviderError(lastError);
+  }
 
   const resolvedSignalTf = normalizeTimeframe(
     parsed.signalTimeframe || activeTimeframe,
     activeTimeframe
   );
 
-  return {
+  const signal: AIPriceActionSignal = {
     id: `sig-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     symbol: instrument.symbol,
     timeframe: activeTimeframe,
     signalTimeframe: resolvedSignalTf,
     analyzedAt: new Date().toISOString(),
-    model: MODEL_NAME,
+    model: usedModel,
     spotPriceAtSignal: currentPrice,
     bias: parsed.bias,
     priceActionNarrative: parsed.priceActionNarrative,
@@ -312,4 +474,11 @@ export async function generatePriceActionSignal(params: {
     })),
     plan: parsed.plan,
   };
+
+  signalCache.set(instrument.symbol, {
+    createdAt: Date.now(),
+    signal,
+  });
+
+  return signal;
 }
