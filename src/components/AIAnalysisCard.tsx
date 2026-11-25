@@ -2,38 +2,114 @@ import {
   AlertCircle,
   ArrowDownRight,
   ArrowUpRight,
+  Bell,
+  Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clock,
+  Copy,
+  Lock,
   RefreshCw,
+  Send,
+  ShieldAlert,
   Zap,
 } from 'lucide-react';
-import type { AIPriceActionSignal, Timeframe } from '../types/market';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  evaluateSignalEntryTiming,
+  formatCountdown,
+  formatUtcTime,
+} from '../analysis/entryTiming';
+import { formatSmsSignalText } from '../analysis/mtfPrompt';
+import { getCandleProgress } from '../analysis/priceAction';
+import type {
+  AIPriceActionSignal,
+  OHLCVCandle,
+  Timeframe,
+} from '../types/market';
 
 interface AIAnalysisCardProps {
   symbol: string;
   timeframe: Timeframe;
   decimals: number;
+  livePrice?: number;
+  formingCandle?: OHLCVCandle | null;
   signal: AIPriceActionSignal | null;
   isAnalyzing: boolean;
   error: string | null;
+  smsConfigured?: boolean;
+  smsSending?: boolean;
+  ntfyReady?: boolean;
+  ntfySending?: boolean;
   onGenerateSignal: () => void;
   onSelectTimeframe: (tf: Timeframe) => void;
   onExecuteOnDemo?: (signal: AIPriceActionSignal) => void;
+  onSendSms?: (signal: AIPriceActionSignal) => void;
+  onSendNtfy?: (signal: AIPriceActionSignal) => void;
 }
 
 export function AIAnalysisCard({
   symbol,
   timeframe,
   decimals,
+  livePrice = 0,
+  formingCandle = null,
   signal,
   isAnalyzing,
   error,
+  smsConfigured = false,
+  smsSending = false,
+  ntfyReady = false,
+  ntfySending = false,
   onGenerateSignal,
   onSelectTimeframe,
   onExecuteOnDemo,
+  onSendSms,
+  onSendNtfy,
 }: AIAnalysisCardProps) {
+  const [showBreakdown, setShowBreakdown] = useState(false);
+  const [copiedAlert, setCopiedAlert] = useState(false);
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowSec(Math.floor(Date.now() / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const execProgress = useMemo(
+    () => getCandleProgress('5M', nowSec),
+    [nowSec]
+  );
+
+  const entryTiming = useMemo(() => {
+    if (!signal) return null;
+    return evaluateSignalEntryTiming({
+      signal,
+      livePrice: signal.symbol === symbol ? livePrice : signal.spotPriceAtSignal,
+      formingCandle:
+        signal.symbol === symbol && timeframe === '5M' ? formingCandle : null,
+      activeChartTimeframe: timeframe,
+      nowSec,
+    });
+  }, [signal, symbol, livePrice, timeframe, formingCandle, nowSec]);
+
+  const handleCopySmsAlert = async () => {
+    if (!signal) return;
+    const text = formatSmsSignalText(signal);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedAlert(true);
+      setTimeout(() => setCopiedAlert(false), 2000);
+    } catch {
+      // Clipboard API unavailable in restricted frames
+    }
+  };
+
   const isDifferentSymbol = signal !== null && signal.symbol !== symbol;
-  const recommendedTf = signal?.signalTimeframe ?? timeframe;
+  const recommendedTf = signal?.signalTimeframe ?? '5M';
   const isViewingRecommendedTf =
     signal !== null &&
     signal.symbol === symbol &&
@@ -54,19 +130,31 @@ export function AIAnalysisCard({
       ? 'border-rose-500/35 bg-rose-500/10'
       : 'border-amber-500/35 bg-amber-500/10';
 
+  const timingStyle =
+    entryTiming?.decision === 'ENTER_NOW'
+      ? 'border-emerald-500/45 bg-emerald-500/12 text-emerald-100'
+      : entryTiming?.decision === 'WAIT_CANDLE_CLOSE'
+      ? 'border-amber-500/45 bg-amber-500/12 text-amber-100'
+      : entryTiming?.decision === 'INVALIDATED' ||
+        entryTiming?.decision === 'MISSED'
+      ? 'border-rose-500/40 bg-rose-500/10 text-rose-100'
+      : 'border-slate-700/90 bg-[#0B0F17] text-slate-200';
+
   return (
     <section
       id="setup"
-      aria-label="AI multi-timeframe pure price-action signal engine"
+      aria-label="5M AI price-action signal"
       className="flex flex-col rounded-lg border border-slate-800/90 bg-[#111722]"
     >
-      <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 px-5 py-4">
-        <div>
+      <div className="flex items-center justify-between gap-3 border-b border-slate-800/80 px-4 py-3.5 sm:px-5">
+        <div className="min-w-0">
           <h2 className="text-sm font-semibold text-slate-50">
-            AI Multi-TF Price Action Signal
+            5M AI Signal
           </h2>
-          <p className="mt-0.5 text-xs text-slate-400">
-            {symbol} <span aria-hidden="true">·</span> Scans 4H / 1H / 15M / 5M / 1M
+          <p className="mt-0.5 text-xs text-slate-400 font-mono tabular-nums truncate">
+            {symbol} <span aria-hidden="true">·</span> Candle Close Only{' '}
+            <span aria-hidden="true">·</span> 5M Close{' '}
+            {formatCountdown(execProgress.secondsRemaining)}
           </p>
         </div>
 
@@ -74,28 +162,28 @@ export function AIAnalysisCard({
           type="button"
           onClick={onGenerateSignal}
           disabled={isAnalyzing}
-          className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-slate-100 transition-colors hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+          className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800/80 px-3 py-1.5 text-xs font-medium text-slate-100 transition-colors hover:bg-slate-700 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
         >
           <RefreshCw
             className={`h-3.5 w-3.5 ${isAnalyzing ? 'animate-spin' : ''}`}
             aria-hidden="true"
           />
-          <span>{signal ? 'Refresh Scan' : 'Generate Signal'}</span>
+          <span>{signal ? 'Refresh' : 'Scan 5M'}</span>
         </button>
       </div>
 
-      <div className="p-5 flex-1 flex flex-col gap-5">
+      <div className="p-4 sm:p-5 flex-1 flex flex-col gap-4">
         {isAnalyzing && (
-          <div className="space-y-4">
-            <div className="h-16 w-full rounded-md bg-slate-800/60 animate-pulse" />
-            <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-3">
+            <div className="h-14 w-full rounded-md bg-slate-800/60 animate-pulse" />
+            <div className="grid grid-cols-2 gap-2.5">
               <div className="h-14 rounded bg-slate-800/50 animate-pulse" />
               <div className="h-14 rounded bg-slate-800/50 animate-pulse" />
               <div className="h-14 rounded bg-slate-800/50 animate-pulse" />
               <div className="h-14 rounded bg-slate-800/50 animate-pulse" />
             </div>
             <p className="text-xs text-slate-400">
-              Scanning 4H, 1H, 15M, 5M, and 1M pure OHLC price action for {symbol}...
+              Analyzing closed 4H–1M candles for {symbol} 5M setup...
             </p>
           </div>
         )}
@@ -109,7 +197,7 @@ export function AIAnalysisCard({
               />
               <div className="space-y-1 min-w-0 flex-1">
                 <p className="text-xs font-semibold text-rose-300">
-                  Signal Generation Failed
+                  Signal Unavailable
                 </p>
                 <p className="text-xs leading-relaxed text-rose-200/90 break-words">
                   {error}
@@ -119,35 +207,34 @@ export function AIAnalysisCard({
             <button
               type="button"
               onClick={onGenerateSignal}
-              className="rounded-md bg-rose-600/80 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-600 cursor-pointer"
+              className="min-h-[38px] rounded-md bg-rose-600/80 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-rose-600 cursor-pointer"
             >
-              Retry Signal Scan
+              Retry Scan
             </button>
           </div>
         )}
 
         {!isAnalyzing && !error && !signal && (
-          <div className="my-auto py-8 text-center space-y-4">
+          <div className="my-auto py-6 text-center space-y-3.5">
             <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-lg border border-slate-800 bg-[#0B0F17] text-blue-400">
               <Zap className="h-5 w-5" aria-hidden="true" />
             </div>
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               <h3 className="text-sm font-semibold text-slate-100">
-                Top-Down Price-Action Scanner
+                Ready to Scan {symbol}
               </h3>
               <p className="mx-auto max-w-xs text-xs leading-relaxed text-slate-400">
-                Studies all 5 timeframes (4H, 1H, 15M, 5M, 1M) using pure candle
-                structure, BOS/CHoCH, sweeps, Order Blocks, and FVGs—then pinpoints
-                which timeframe offers the cleanest BUY, SELL, or WAIT setup.
+                Locks strictly to closed 5M candles so signals never repaint mid-bar,
+                and tells you whether to enter now or wait for candle close.
               </p>
             </div>
             <button
               type="button"
               onClick={onGenerateSignal}
-              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-500 cursor-pointer"
+              className="inline-flex min-h-[42px] items-center gap-2 rounded-lg bg-blue-600 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-500 cursor-pointer"
             >
               <Zap className="h-3.5 w-3.5" aria-hidden="true" />
-              <span>Scan All Timeframes</span>
+              <span>Scan 5M Setup</span>
             </button>
           </div>
         )}
@@ -156,9 +243,7 @@ export function AIAnalysisCard({
           <>
             {isDifferentSymbol && (
               <div className="flex items-center justify-between gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                <span>
-                  Showing prior signal for {signal.symbol} ({recommendedTf}).
-                </span>
+                <span>Showing prior signal for {signal.symbol}.</span>
                 <button
                   type="button"
                   onClick={onGenerateSignal}
@@ -169,9 +254,9 @@ export function AIAnalysisCard({
               </div>
             )}
 
-            {/* Primary Signal Action Header + Recommended Execution Timeframe */}
+            {/* Primary Signal Action Header */}
             <div
-              className={`flex flex-wrap items-center justify-between gap-3 rounded-md border p-3.5 ${signalBannerStyle}`}
+              className={`flex flex-wrap items-center justify-between gap-2 rounded-md border p-3.5 ${signalBannerStyle}`}
             >
               <div className="flex items-center gap-2.5">
                 {signalAction === 'BUY' ? (
@@ -204,195 +289,302 @@ export function AIAnalysisCard({
                 <div className="font-semibold text-slate-100">
                   R:R {signal.plan.riskRewardRatio}
                 </div>
-                <div className="text-slate-400">
-                  {new Date(signal.analyzedAt).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit',
-                  })}
-                </div>
+                <div className="text-slate-400">{signal.model}</div>
               </div>
             </div>
 
+            {/* Unambiguous Entry Timing Verdict: ENTER NOW vs WAIT FOR CANDLE CLOSE */}
+            {entryTiming && (
+              <div className={`rounded-md border p-3.5 space-y-2 ${timingStyle}`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2 min-w-0">
+                    {entryTiming.decision === 'ENTER_NOW' ? (
+                      <CheckCircle2
+                        className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400"
+                        aria-hidden="true"
+                      />
+                    ) : entryTiming.decision === 'WAIT_CANDLE_CLOSE' ? (
+                      <Clock
+                        className="mt-0.5 h-4 w-4 shrink-0 text-amber-300"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <ShieldAlert
+                        className="mt-0.5 h-4 w-4 shrink-0 text-slate-300"
+                        aria-hidden="true"
+                      />
+                    )}
+                    <div className="text-xs font-bold tracking-tight">
+                      {entryTiming.headline}
+                    </div>
+                  </div>
+                  <span className="font-mono tabular-nums text-xs font-semibold shrink-0">
+                    {formatCountdown(execProgress.secondsRemaining)}
+                  </span>
+                </div>
+
+                <p className="text-xs leading-relaxed opacity-90">
+                  {entryTiming.detail}
+                </p>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/10 pt-2 text-[11px] opacity-85">
+                  <span className="truncate">{entryTiming.closeCondition}</span>
+                  <span className="inline-flex items-center gap-1 font-mono tabular-nums shrink-0 text-slate-300">
+                    <Lock className="h-3 w-3" aria-hidden="true" />
+                    <span>
+                      {signal.confirmedBarTime > 0
+                        ? `Locked ${formatUtcTime(signal.confirmedBarTime)} bar`
+                        : 'Closed-bar locked'}
+                    </span>
+                  </span>
+                </div>
+              </div>
+            )}
+
             {!isDifferentSymbol && !isViewingRecommendedTf && (
               <div className="flex items-center justify-between gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-200">
-                <span>
-                  Optimal setup detected on{' '}
-                  <strong className="font-mono text-blue-100">
-                    {recommendedTf}
-                  </strong>{' '}
-                  (currently viewing {timeframe}).
-                </span>
+                <span>Execution is on 5M (viewing {timeframe}).</span>
                 <button
                   type="button"
-                  onClick={() => onSelectTimeframe(recommendedTf)}
+                  onClick={() => onSelectTimeframe('5M')}
                   className="font-semibold text-blue-300 underline hover:text-blue-200 whitespace-nowrap cursor-pointer"
                 >
-                  Switch to {recommendedTf}
+                  Switch to 5M
                 </button>
               </div>
             )}
 
-            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-300">
-              <div>
-                <span className="text-slate-400">Trigger ({recommendedTf}): </span>
-                <span className="font-medium text-slate-100">
-                  {signal.plan.triggerPattern}
-                </span>
-              </div>
-              <span className="font-mono text-[11px] text-slate-400">
-                {signal.model}
-              </span>
-            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {onExecuteOnDemo && signal.plan.signal !== 'WAIT' && (() => {
+                const canEnterNow = entryTiming?.decision === 'ENTER_NOW';
+                const btnLabel = canEnterNow
+                  ? `Enter ${signal.plan.signal} Now (Demo)`
+                  : entryTiming?.decision === 'WAIT_CANDLE_CLOSE'
+                  ? `Wait ${formatCountdown(execProgress.secondsRemaining)} for 5M Close`
+                  : entryTiming?.decision === 'MISSED'
+                  ? 'Missed — Wait Next Close'
+                  : 'Invalidated — Wait Next Close';
 
-            {onExecuteOnDemo && signal.plan.signal !== 'WAIT' && (
+                return (
+                  <button
+                    type="button"
+                    disabled={!canEnterNow}
+                    onClick={() => onExecuteOnDemo(signal)}
+                    title={
+                      canEnterNow
+                        ? 'Execute closed-bar confirmed setup in Demo account'
+                        : 'Candle close confirmation only — entry locked until 5M bar closes in direction'
+                    }
+                    className={`flex-1 min-h-[40px] rounded-md border px-3 py-2 text-xs font-semibold transition-colors whitespace-nowrap font-mono tabular-nums ${
+                      canEnterNow
+                        ? 'border-emerald-500/50 bg-emerald-600/20 text-emerald-200 hover:bg-emerald-600/30 cursor-pointer'
+                        : 'border-slate-700/80 bg-[#0B0F17] text-slate-400 opacity-65 cursor-not-allowed'
+                    }`}
+                  >
+                    {btnLabel}
+                  </button>
+                );
+              })()}
+
               <button
                 type="button"
-                onClick={() => onExecuteOnDemo(signal)}
-                className="w-full rounded-md border border-blue-500/40 bg-blue-600/15 py-2 text-xs font-semibold text-blue-200 transition-colors hover:bg-blue-600/25 cursor-pointer"
+                onClick={handleCopySmsAlert}
+                className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-3 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 hover:text-white whitespace-nowrap cursor-pointer"
               >
-                Place {signal.plan.signal} Order on Demo Account
+                {copiedAlert ? (
+                  <Check className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+                ) : (
+                  <Copy className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                )}
+                <span>{copiedAlert ? 'Copied SMS' : 'Copy SMS'}</span>
               </button>
-            )}
+
+              {onSendNtfy && (
+                <button
+                  type="button"
+                  onClick={() => onSendNtfy(signal)}
+                  disabled={ntfySending || !ntfyReady}
+                  title={
+                    ntfyReady
+                      ? 'Send instant free phone push via ntfy.sh'
+                      : 'Enter or generate an ntfy topic in the Market Sniper Scanner first'
+                  }
+                  className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-xs font-medium text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:opacity-45 whitespace-nowrap cursor-pointer"
+                >
+                  <Bell className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>{ntfySending ? 'Pushing...' : 'Push ntfy'}</span>
+                </button>
+              )}
+
+              {onSendSms && smsConfigured && (
+                <button
+                  type="button"
+                  onClick={() => onSendSms(signal)}
+                  disabled={smsSending}
+                  title="Send this signal via SMS"
+                  className="inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-3 py-2 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 hover:text-white disabled:opacity-45 whitespace-nowrap cursor-pointer"
+                >
+                  <Send className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>{smsSending ? 'Sending...' : 'Send SMS'}</span>
+                </button>
+              )}
+            </div>
 
             {/* Signal Execution Levels */}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-2.5">
               <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Signal Entry</div>
+                <div className="text-[11px] text-slate-400">
+                  {signalAction === 'WAIT' ? 'Watch Entry (5M)' : 'Entry (5M)'}
+                </div>
                 <div className="mt-1 font-mono tabular-nums text-sm font-semibold text-blue-400">
-                  {signal.plan.entryPrice.toFixed(decimals)}
+                  {signal.plan.entryPrice > 0
+                    ? signal.plan.entryPrice.toFixed(decimals)
+                    : 'Wait for Trigger'}
                 </div>
                 <div className="mt-0.5 font-mono tabular-nums text-[11px] text-slate-400 truncate">
-                  Zone: {signal.plan.entryZone}
+                  {signal.plan.entryZone}
                 </div>
               </div>
 
               <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Stop Loss</div>
+                <div className="text-[11px] text-slate-400">
+                  {signalAction === 'WAIT' ? 'Planned SL' : 'Stop Loss'}
+                </div>
                 <div className="mt-1 font-mono tabular-nums text-sm font-semibold text-rose-400">
-                  {signal.plan.stopLoss.toFixed(decimals)}
+                  {signal.plan.stopLoss > 0
+                    ? signal.plan.stopLoss.toFixed(decimals)
+                    : '—'}
                 </div>
-                <div className="mt-0.5 text-[11px] text-slate-400">
-                  Structure invalidation
+                <div className="mt-0.5 text-[11px] text-slate-400 truncate">
+                  {signal.plan.triggerPattern}
                 </div>
               </div>
 
               <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Take Profit 1</div>
+                <div className="text-[11px] text-slate-400">
+                  {signalAction === 'WAIT' ? 'Target TP1' : 'Take Profit 1'}
+                </div>
                 <div className="mt-1 font-mono tabular-nums text-sm font-semibold text-emerald-400">
-                  {signal.plan.takeProfit1.toFixed(decimals)}
-                </div>
-                <div className="mt-0.5 text-[11px] text-slate-400">
-                  First liquidity target
+                  {signal.plan.takeProfit1 > 0
+                    ? signal.plan.takeProfit1.toFixed(decimals)
+                    : '—'}
                 </div>
               </div>
 
               <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-3">
-                <div className="text-[11px] text-slate-400">Take Profit 2</div>
-                <div className="mt-1 font-mono tabular-nums text-sm font-semibold text-emerald-300">
-                  {signal.plan.takeProfit2.toFixed(decimals)}
+                <div className="text-[11px] text-slate-400">
+                  {signalAction === 'WAIT' ? 'Target TP2' : 'Take Profit 2'}
                 </div>
-                <div className="mt-0.5 text-[11px] text-slate-400">
-                  Extended swing target
+                <div className="mt-1 font-mono tabular-nums text-sm font-semibold text-emerald-300">
+                  {signal.plan.takeProfit2 > 0
+                    ? signal.plan.takeProfit2.toFixed(decimals)
+                    : '—'}
                 </div>
               </div>
             </div>
 
-            {/* Multi-Timeframe Alignment Matrix */}
-            {signal.timeframeAlignment && signal.timeframeAlignment.length > 0 && (
-              <div className="space-y-2">
-                <h3 className="text-xs font-semibold text-slate-200">
-                  Multi-Timeframe Price Action Alignment
-                </h3>
-                <div className="divide-y divide-slate-800/70 rounded-md border border-slate-800/90 bg-[#0B0F17]">
-                  {signal.timeframeAlignment.map((row) => {
-                    const isBest = row.timeframe === recommendedTf;
-                    const rowBiasColor =
-                      row.bias === 'Bullish'
-                        ? 'text-emerald-400'
-                        : row.bias === 'Bearish'
-                        ? 'text-rose-400'
-                        : 'text-amber-300';
+            {/* Concise Top-Down Summary */}
+            <div className="space-y-2 text-xs leading-relaxed">
+              <p className="text-slate-300">{signal.priceActionNarrative}</p>
+              <p className="text-slate-400">
+                <span className="font-semibold text-slate-200">Invalidation: </span>
+                {signal.plan.invalidationReason}
+              </p>
+            </div>
 
-                    return (
-                      <button
-                        key={row.timeframe}
-                        type="button"
-                        onClick={() => onSelectTimeframe(row.timeframe)}
-                        className={`w-full px-3 py-2 text-left text-[11px] transition-colors hover:bg-slate-800/40 cursor-pointer ${
-                          isBest ? 'bg-blue-500/10' : ''
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono font-semibold text-slate-100 w-7">
-                              {row.timeframe}
-                            </span>
-                            <span className={`font-medium ${rowBiasColor}`}>
-                              {row.bias}
-                            </span>
-                            <span className="text-slate-400">
-                              · {row.structureEvent}
-                            </span>
-                          </div>
-                          <span className="text-slate-400 shrink-0">
-                            {isBest ? 'Signal TF' : row.rangeZone}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 pl-9 text-slate-400 truncate">
-                          {row.note}
-                        </div>
-                      </button>
-                    );
-                  })}
+            {/* Collapsible Detailed MTF Breakdown */}
+            <div className="border-t border-slate-800/80 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowBreakdown((v) => !v)}
+                className="flex w-full min-h-[38px] items-center justify-between text-xs font-medium text-slate-300 hover:text-white cursor-pointer"
+              >
+                <span>
+                  {showBreakdown
+                    ? 'Hide MTF Breakdown & Zones'
+                    : 'Show MTF Breakdown & Zones'}
+                </span>
+                {showBreakdown ? (
+                  <ChevronUp className="h-4 w-4 text-slate-400" aria-hidden="true" />
+                ) : (
+                  <ChevronDown className="h-4 w-4 text-slate-400" aria-hidden="true" />
+                )}
+              </button>
+
+              {showBreakdown && (
+                <div className="mt-3 space-y-4">
+                  {signal.timeframeAlignment && signal.timeframeAlignment.length > 0 && (
+                    <div className="divide-y divide-slate-800/70 rounded-md border border-slate-800/90 bg-[#0B0F17]">
+                      {signal.timeframeAlignment.map((row) => {
+                        const isBest = row.timeframe === recommendedTf;
+                        const rowBiasColor =
+                          row.bias === 'Bullish'
+                            ? 'text-emerald-400'
+                            : row.bias === 'Bearish'
+                            ? 'text-rose-400'
+                            : 'text-amber-300';
+
+                        return (
+                          <button
+                            key={row.timeframe}
+                            type="button"
+                            onClick={() => onSelectTimeframe(row.timeframe)}
+                            className={`w-full min-h-[44px] px-3 py-2 text-left text-[11px] transition-colors hover:bg-slate-800/40 cursor-pointer ${
+                              isBest ? 'bg-blue-500/10' : ''
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-semibold text-slate-100 w-7">
+                                  {row.timeframe}
+                                </span>
+                                <span className={`font-medium ${rowBiasColor}`}>
+                                  {row.bias}
+                                </span>
+                                <span className="text-slate-400">
+                                  · {row.structureEvent}
+                                </span>
+                              </div>
+                              <span className="text-slate-400 shrink-0">
+                                {isBest ? '5M Exec' : row.rangeZone}
+                              </span>
+                            </div>
+                            <div className="mt-0.5 pl-9 text-slate-400 truncate">
+                              {row.note}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div className="space-y-2 text-xs leading-relaxed">
+                    <div>
+                      <h3 className="font-semibold text-slate-200 mb-1">
+                        Order Blocks, FVGs &amp; Liquidity
+                      </h3>
+                      <p className="text-slate-300">{signal.keyZonesExplanation}</p>
+                    </div>
+
+                    {signal.plan.confluences.length > 0 && (
+                      <ul className="space-y-1.5 pt-1">
+                        {signal.plan.confluences.map((item, idx) => (
+                          <li
+                            key={idx}
+                            className="flex items-start gap-2 text-slate-300"
+                          >
+                            <CheckCircle2
+                              className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue-400"
+                              aria-hidden="true"
+                            />
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
-
-            {/* Pure Price Action Reasoning */}
-            <div className="space-y-3 text-xs leading-relaxed">
-              <div>
-                <h3 className="font-semibold text-slate-200 mb-1">
-                  Top-Down Price Action Read
-                </h3>
-                <p className="text-slate-300">{signal.priceActionNarrative}</p>
-              </div>
-
-              <div>
-                <h3 className="font-semibold text-slate-200 mb-1">
-                  Order Blocks, FVGs &amp; Liquidity Zones
-                </h3>
-                <p className="text-slate-300">{signal.keyZonesExplanation}</p>
-              </div>
-
-              <div>
-                <h3 className="font-semibold text-slate-200 mb-1.5">
-                  Pure Price-Action Confluences
-                </h3>
-                <ul className="space-y-1.5">
-                  {signal.plan.confluences.map((item, idx) => (
-                    <li
-                      key={idx}
-                      className="flex items-start gap-2 text-slate-300"
-                    >
-                      <CheckCircle2
-                        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-blue-400"
-                        aria-hidden="true"
-                      />
-                      <span>{item}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              <div className="border-t border-slate-800/70 pt-3">
-                <span className="font-semibold text-slate-200">
-                  Invalidation:{' '}
-                </span>
-                <span className="text-slate-400">
-                  {signal.plan.invalidationReason}
-                </span>
-              </div>
+              )}
             </div>
           </>
         )}

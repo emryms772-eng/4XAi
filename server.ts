@@ -4,19 +4,35 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { runNonRepaintingBacktest } from './src/analysis/backtester.ts';
-import { analyzePriceAction } from './src/analysis/priceAction.ts';
+import { analyzePriceAction, getCandleProgress } from './src/analysis/priceAction.ts';
 import { TIMEFRAMES, getInstrumentBySymbol } from './src/config/instruments.ts';
 import {
   generateBacktestReview,
   generatePriceActionSignal,
+  scanMarketSniperSetups,
 } from './src/server/aiAnalysis.ts';
 import {
   advanceMarketTick,
   getMarketCandles,
   getWatchlistQuotes,
 } from './src/server/marketData.ts';
+import {
+  getActiveNtfySubscriptions,
+  getNtfyConfigStatus,
+  registerNtfySubscription,
+  sendNtfyMarketScanDigest,
+  sendNtfySignalAlert,
+  sendNtfyTestMessage,
+} from './src/server/ntfy.ts';
+import {
+  getSmsConfigStatus,
+  sendSmsSignalAlert,
+  sendSmsTestMessage,
+} from './src/server/sms.ts';
 import type {
   AIBacktestReview,
+  AIPriceActionSignal,
+  MarketScanResponse,
   OHLCVCandle,
   Timeframe,
 } from './src/types/market.ts';
@@ -48,7 +64,9 @@ async function startServer() {
       const enriched = await Promise.all(
         quotes.map(async (q) => {
           const data = await getMarketCandles(q.symbol, '5M', 120);
-          const pa = analyzePriceAction(data.candles, q.decimals);
+          const pa = analyzePriceAction(data.candles, q.decimals, {
+            timeframe: '5M',
+          });
           return {
             ...q,
             structureHint: pa.snapshot.latestStructureEvent,
@@ -72,7 +90,9 @@ async function startServer() {
       const limit = Math.min(Math.max(Number(req.query.limit) || 180, 40), 300);
 
       const data = await getMarketCandles(symbol, timeframe, limit);
-      const priceAction = analyzePriceAction(data.candles, data.decimals);
+      const priceAction = analyzePriceAction(data.candles, data.decimals, {
+        timeframe,
+      });
       res.json({ ...data, priceAction });
     } catch (error) {
       const message =
@@ -159,14 +179,24 @@ async function startServer() {
       const orderedTfs: Timeframe[] = ['4H', '1H', '15M', '5M', '1M'];
       const timeframesData = await Promise.all(
         orderedTfs.map(async (tf) => {
-          let candles =
-            tf === activeTimeframe && clientCandles.length >= 30
+          const targetLimit = tf === '5M' ? 240 : 200;
+          const serverData = await getMarketCandles(
+            instrument.symbol,
+            tf,
+            targetLimit
+          );
+          const candles =
+            serverData.candles.length >= 40
+              ? serverData.candles
+              : tf === activeTimeframe && clientCandles.length >= 40
               ? clientCandles
-              : (await getMarketCandles(instrument.symbol, tf, 160)).candles;
+              : serverData.candles;
           return {
             timeframe: tf,
             candles,
-            analysis: analyzePriceAction(candles, instrument.decimals),
+            analysis: analyzePriceAction(candles, instrument.decimals, {
+              timeframe: tf,
+            }),
           };
         })
       );
@@ -194,6 +224,23 @@ async function startServer() {
     }
   });
 
+  app.all('/api/analysis/scan-market', async (req, res) => {
+    if (req.method !== 'POST' && req.method !== 'GET') {
+      res.status(405).json({ error: 'Method not allowed' });
+      return;
+    }
+    try {
+      const scan = await scanMarketSniperSetups();
+      res.json(scan);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to complete market sniper scan.';
+      res.status(500).json({ error: message });
+    }
+  });
+
   app.post('/api/analysis/backtest', async (req, res) => {
     try {
       const symbol =
@@ -211,15 +258,28 @@ async function startServer() {
         ? (req.body.candles as OHLCVCandle[])
         : [];
 
-      const candles =
+      const [ltfData, h1Data, h4Data] = await Promise.all([
         clientCandles.length >= 260
-          ? clientCandles
-          : (await getMarketCandles(instrument.symbol, timeframe, 280)).candles;
+          ? Promise.resolve(null)
+          : getMarketCandles(instrument.symbol, timeframe, 420),
+        getMarketCandles(instrument.symbol, '1H', 220),
+        getMarketCandles(instrument.symbol, '4H', 160),
+      ]);
+
+      const candles =
+        clientCandles.length >= 260 ? clientCandles : ltfData!.candles;
+      const htfAligned =
+        h1Data.source === 'live-api' &&
+        h4Data.source === 'live-api' &&
+        (ltfData ? ltfData.source === 'live-api' : true);
 
       const backtest = runNonRepaintingBacktest({
         symbol: instrument.symbol,
         timeframe,
         candles,
+        htf1hCandles: h1Data.candles,
+        htf4hCandles: h4Data.candles,
+        htfAligned,
         initialCapital: 10000,
         riskPercentPerTrade,
       });
@@ -248,15 +308,226 @@ async function startServer() {
     }
   });
 
+  app.get('/api/notifications/sms', (_req, res) => {
+    res.json(getSmsConfigStatus());
+  });
+
+  app.get('/api/notifications/sms/status', (_req, res) => {
+    res.json(getSmsConfigStatus());
+  });
+
+  app.post('/api/notifications/sms/test', async (_req, res) => {
+    try {
+      const result = await sendSmsTestMessage();
+      res.json({ ok: true, sent: true, provider: result.provider });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to send test SMS alert.';
+      const status = message.includes('not configured') ? 400 : 500;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.post('/api/notifications/sms', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        action?: unknown;
+        signal?: unknown;
+      };
+
+      if (body.action === 'test') {
+        const result = await sendSmsTestMessage();
+        res.json({ ok: true, sent: true, provider: result.provider });
+        return;
+      }
+
+      const sig = body.signal as Partial<AIPriceActionSignal> | undefined;
+      if (
+        !sig ||
+        typeof sig !== 'object' ||
+        typeof sig.id !== 'string' ||
+        !sig.id ||
+        typeof sig.symbol !== 'string' ||
+        !sig.symbol ||
+        typeof sig.spotPriceAtSignal !== 'number' ||
+        !Number.isFinite(sig.spotPriceAtSignal) ||
+        !sig.plan ||
+        typeof sig.plan !== 'object' ||
+        typeof sig.plan.signal !== 'string'
+      ) {
+        res.status(400).json({ error: 'Invalid signal payload for SMS alert.' });
+        return;
+      }
+
+      const result = await sendSmsSignalAlert(sig as AIPriceActionSignal);
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to send SMS notification.';
+      const status = message.includes('not configured') ? 400 : 500;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.get('/api/notifications/ntfy', (_req, res) => {
+    res.json(getNtfyConfigStatus());
+  });
+
+  app.post('/api/notifications/ntfy/test', async (req, res) => {
+    try {
+      const topic = (req.body as { topic?: unknown } | undefined)?.topic;
+      const result = await sendNtfyTestMessage(topic);
+      res.json({ sent: true, ...result });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to send test ntfy notification.';
+      const status =
+        message.includes('Invalid ntfy') || message.includes('No ntfy')
+          ? 400
+          : 500;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.post('/api/notifications/ntfy/subscribe', (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        topic?: unknown;
+        enabled?: unknown;
+        notifyWait?: unknown;
+      };
+      const result = registerNtfySubscription({
+        topic: body.topic,
+        enabled: body.enabled !== false,
+        notifyWait: body.notifyWait !== false,
+      });
+      res.json(result);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to update ntfy subscription.';
+      res.status(400).json({ error: message });
+    }
+  });
+
+  app.post('/api/notifications/ntfy', async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as {
+        action?: unknown;
+        topic?: unknown;
+        signal?: unknown;
+        scan?: unknown;
+        notifyWait?: unknown;
+      };
+
+      if (body.action === 'test') {
+        const result = await sendNtfyTestMessage(body.topic);
+        res.json({ sent: true, ...result });
+        return;
+      }
+
+      if (body.action === 'subscribe') {
+        const result = registerNtfySubscription({
+          topic: body.topic,
+          enabled: true,
+          notifyWait: body.notifyWait !== false,
+        });
+        res.json(result);
+        return;
+      }
+
+      if (body.action === 'digest') {
+        const scan = body.scan as Partial<MarketScanResponse> | undefined;
+        if (!scan || typeof scan !== 'object' || !Array.isArray(scan.watchSignals)) {
+          res.status(400).json({ error: 'Invalid scan payload for ntfy digest.' });
+          return;
+        }
+        const result = await sendNtfyMarketScanDigest(
+          scan as MarketScanResponse,
+          body.topic
+        );
+        res.json({ ok: true, ...result });
+        return;
+      }
+
+      const sig = body.signal as Partial<AIPriceActionSignal> | undefined;
+      if (
+        !sig ||
+        typeof sig !== 'object' ||
+        typeof sig.id !== 'string' ||
+        !sig.id ||
+        typeof sig.symbol !== 'string' ||
+        !sig.symbol ||
+        typeof sig.spotPriceAtSignal !== 'number' ||
+        !Number.isFinite(sig.spotPriceAtSignal) ||
+        !sig.plan ||
+        typeof sig.plan !== 'object' ||
+        typeof sig.plan.signal !== 'string'
+      ) {
+        res.status(400).json({ error: 'Invalid signal payload for ntfy alert.' });
+        return;
+      }
+
+      const result = await sendNtfySignalAlert(
+        sig as AIPriceActionSignal,
+        body.topic
+      );
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to send ntfy notification.';
+      const status =
+        message.includes('Invalid ntfy') || message.includes('No ntfy')
+          ? 400
+          : 500;
+      res.status(status).json({ error: message });
+    }
+  });
+
   const distPath = path.resolve(__dirname, 'dist');
   const isProd = process.env.NODE_ENV === 'production';
 
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
+    const disableHmr = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
+      plugins: disableHmr
+        ? [
+            {
+              name: 'disable-vite-client-hmr-ws',
+              transform(code, id) {
+                if (
+                  id.includes('vite/dist/client/client.mjs') ||
+                  id.includes('@vite/client')
+                ) {
+                  return code
+                    .replace(
+                      'ws.send(JSON.stringify(data));',
+                      'if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(data));'
+                    )
+                    .replace(
+                      'transport.connect(createHMRHandler(handleMessage));',
+                      '/* WebSocket HMR disabled via DISABLE_HMR=true */'
+                    );
+                }
+                return null;
+              },
+            },
+          ]
+        : [],
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR !== 'true',
+        hmr: !disableHmr,
+        ws: disableHmr ? false : undefined,
       },
       appType: 'spa',
     });
@@ -270,6 +541,56 @@ async function startServer() {
 
   app.listen(port, '0.0.0.0', () => {
     console.log(`StrataDesk server listening on http://0.0.0.0:${port}`);
+
+    // Background 5M closed-bar sniper watcher so ntfy alerts fire reliably even when browser tabs sleep
+    let lastAutoPushBarBucket = 0;
+    let backgroundScanBusy = false;
+
+    const runServerAutoPushTick = async () => {
+      if (backgroundScanBusy) return;
+      const subs = getActiveNtfySubscriptions();
+      if (subs.length === 0) return;
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const { bucketStartSec } = getCandleProgress('5M', nowSec);
+      const elapsedInBar = nowSec - bucketStartSec;
+      // Wait 6s after each 5M close so broker feeds publish the finalized bar
+      if (elapsedInBar < 6 || bucketStartSec <= lastAutoPushBarBucket) {
+        return;
+      }
+
+      backgroundScanBusy = true;
+      lastAutoPushBarBucket = bucketStartSec;
+      try {
+        const scan = await scanMarketSniperSetups();
+        for (const sub of subs) {
+          if (scan.sniperSignals.length > 0) {
+            for (const sig of scan.sniperSignals) {
+              try {
+                await sendNtfySignalAlert(sig, sub.topic);
+              } catch {
+                // Non-blocking ntfy push error
+              }
+            }
+          } else if (sub.notifyWait) {
+            try {
+              await sendNtfyMarketScanDigest(scan, sub.topic);
+            } catch {
+              // Non-blocking ntfy digest error
+            }
+          }
+        }
+      } catch {
+        // Retry cleanly on next interval if transient feed error occurred
+        lastAutoPushBarBucket = 0;
+      } finally {
+        backgroundScanBusy = false;
+      }
+    };
+
+    setInterval(() => {
+      void runServerAutoPushTick();
+    }, 10_000);
   });
 }
 

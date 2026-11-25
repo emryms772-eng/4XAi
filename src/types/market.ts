@@ -141,12 +141,31 @@ export interface TimeframeAlignmentItem {
   note: string;
 }
 
+export type EntryTimingStatus =
+  | 'ENTER_NOW'
+  | 'WAIT_CANDLE_CLOSE'
+  | 'WAIT_FOR_SETUP'
+  | 'INVALIDATED'
+  | 'MISSED';
+
+export interface SignalEntryTiming {
+  decision: EntryTimingStatus;
+  headline: string;
+  detail: string;
+  closeCondition: string;
+  candleCloseTime: number;
+  candleTimeframe: Timeframe;
+}
+
 export interface AIPriceActionSignal {
   id: string;
   symbol: string;
   timeframe: Timeframe;
   signalTimeframe: Timeframe;
   analyzedAt: string;
+  confirmedBarTime: number;
+  confirmedBarCloseTime: number;
+  isLockedToClosedBar: boolean;
   model: string;
   spotPriceAtSignal: number;
   bias: 'Bullish' | 'Bearish' | 'Neutral';
@@ -164,6 +183,24 @@ export interface AutoTradeConfig {
   autoScanIntervalSec: AutoScanIntervalSec;
   scanScope: AutoScanScope;
   riskPercentPerTrade: 0.5 | 1 | 2;
+  ntfyAlertsEnabled: boolean;
+  ntfyTopic: string;
+  ntfyNotifyWait: boolean;
+  ntfyAllScansInitialized?: boolean;
+  smsAlertsEnabled: boolean;
+  smsNotifyWait: boolean;
+}
+
+export interface NtfyConfigStatus {
+  configured: boolean;
+  serverUrl: string;
+  topicMasked: string | null;
+}
+
+export interface SmsConfigStatus {
+  configured: boolean;
+  provider: 'twilio' | 'textbelt' | 'vonage' | 'none';
+  recipientMasked: string | null;
 }
 
 export interface DemoPosition {
@@ -268,6 +305,14 @@ export interface BacktestResult {
   expectancyR: number;
   maxDrawdownPct: number;
   nonRepaintingVerified: boolean;
+  appliedFilters?: string[];
+  filterStats?: {
+    candidatesEvaluated: number;
+    rejectedByHtfBias: number;
+    rejectedByPremiumDiscount: number;
+    rejectedByDisplacement: number;
+    qualifiedSetups: number;
+  };
   setupBreakdown: BacktestSetupStats[];
   equityCurve: BacktestEquityPoint[];
   trades: BacktestTrade[];
@@ -283,4 +328,10 @@ export interface AIBacktestReview {
   recommendations: string[];
 }
 
-
+export interface MarketScanResponse {
+  scannedAt: string;
+  confirmedBarTime: number;
+  totalScanned: number;
+  sniperSignals: AIPriceActionSignal[];
+  watchSignals: AIPriceActionSignal[];
+}

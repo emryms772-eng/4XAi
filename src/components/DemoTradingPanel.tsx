@@ -1,13 +1,18 @@
 import {
   ArrowDownRight,
   ArrowUpRight,
+  Bell,
+  MessageSquare,
   Play,
   RotateCcw,
+  Send,
   ShieldCheck,
+  Sparkles,
   Square,
   X,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { evaluateSignalEntryTiming } from '../analysis/entryTiming';
 import { getInstrumentBySymbol } from '../config/instruments';
 import type {
   AIPriceActionSignal,
@@ -15,14 +20,26 @@ import type {
   AutoScanScope,
   AutoTradeConfig,
   DemoAccountState,
+  OHLCVCandle,
+  SmsConfigStatus,
 } from '../types/market';
 
 interface DemoTradingPanelProps {
   demoAccount: DemoAccountState;
   activeSignal: AIPriceActionSignal | null;
   selectedSymbol: string;
+  livePrice?: number;
+  formingCandle?: OHLCVCandle | null;
   nextScanSecondsLeft: number | null;
   lastExecutionNote: string | null;
+  smsStatus: SmsConfigStatus | null;
+  smsSending: boolean;
+  ntfyReady: boolean;
+  ntfySending: boolean;
+  ntfyFeedback: string | null;
+  onGenerateNtfyTopic: () => void;
+  onTestNtfy: () => void;
+  onTestSms: () => void;
   onUpdateConfig: (patch: Partial<AutoTradeConfig>) => void;
   onExecuteSignal: (signal: AIPriceActionSignal) => void;
   onClosePosition: (positionId: string) => void;
@@ -33,9 +50,9 @@ interface DemoTradingPanelProps {
 
 const SCAN_INTERVALS: Array<{ value: AutoScanIntervalSec; label: string }> = [
   { value: 0, label: 'Off' },
-  { value: 60, label: '60s' },
-  { value: 180, label: '3m' },
-  { value: 300, label: '5m' },
+  { value: 60, label: '1m Close' },
+  { value: 180, label: '3m Close' },
+  { value: 300, label: '5m Close' },
 ];
 
 const RISK_OPTIONS: Array<0.5 | 1 | 2> = [0.5, 1, 2];
@@ -44,8 +61,18 @@ export function DemoTradingPanel({
   demoAccount,
   activeSignal,
   selectedSymbol,
+  livePrice = 0,
+  formingCandle = null,
   nextScanSecondsLeft,
   lastExecutionNote,
+  smsStatus,
+  smsSending,
+  ntfyReady,
+  ntfySending,
+  ntfyFeedback,
+  onGenerateNtfyTopic,
+  onTestNtfy,
+  onTestSms,
   onUpdateConfig,
   onExecuteSignal,
   onClosePosition,
@@ -54,6 +81,15 @@ export function DemoTradingPanel({
   onSelectSymbol,
 }: DemoTradingPanelProps) {
   const [activeTab, setActiveTab] = useState<'open' | 'history'>('open');
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+
+  useEffect(() => {
+    if (!activeSignal) return;
+    const timer = setInterval(() => {
+      setNowSec(Math.floor(Date.now() / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [activeSignal]);
 
   const stats = useMemo(() => {
     const unrealized = demoAccount.openPositions.reduce(
@@ -81,10 +117,21 @@ export function DemoTradingPanel({
     };
   }, [demoAccount]);
 
+  const activeTiming = useMemo(() => {
+    if (!activeSignal || activeSignal.symbol !== selectedSymbol) return null;
+    return evaluateSignalEntryTiming({
+      signal: activeSignal,
+      livePrice: livePrice > 0 ? livePrice : activeSignal.spotPriceAtSignal,
+      formingCandle,
+      nowSec,
+    });
+  }, [activeSignal, selectedSymbol, livePrice, formingCandle, nowSec]);
+
   const canExecuteCurrent =
     activeSignal !== null &&
     activeSignal.symbol === selectedSymbol &&
-    activeSignal.plan.signal !== 'WAIT';
+    activeSignal.plan.signal !== 'WAIT' &&
+    activeTiming?.decision === 'ENTER_NOW';
 
   return (
     <section
@@ -100,7 +147,7 @@ export function DemoTradingPanel({
               Demo Paper Account &amp; Auto-Trader
             </h2>
             <span className="text-xs text-slate-400">
-              Simulated Virtual Balance · No Real Capital
+              Simulated Virtual Balance · Candle Close Confirmation Only
             </span>
           </div>
           {lastExecutionNote && (
@@ -198,12 +245,12 @@ export function DemoTradingPanel({
             </button>
           </div>
 
-          {/* Auto-Scan Timer */}
+          {/* Candle-Close Auto-Scan Timer */}
           <div className="flex items-center gap-2">
-            <span className="text-slate-400">Auto-Scan:</span>
+            <span className="text-slate-400">Close Scan:</span>
             <div
               role="group"
-              aria-label="Auto-scan interval"
+              aria-label="Candle-close auto-scan cadence"
               className="flex items-center gap-1 rounded-md border border-slate-800 bg-[#0B0F17] p-0.5"
             >
               {SCAN_INTERVALS.map((opt) => {
@@ -229,7 +276,7 @@ export function DemoTradingPanel({
             {nextScanSecondsLeft !== null &&
               demoAccount.config.autoScanIntervalSec > 0 && (
                 <span className="font-mono tabular-nums text-[11px] text-sky-400">
-                  Next in {nextScanSecondsLeft}s
+                  Close in {nextScanSecondsLeft}s
                 </span>
               )}
           </div>
@@ -303,11 +350,126 @@ export function DemoTradingPanel({
             <button
               type="button"
               onClick={() => onExecuteSignal(activeSignal)}
-              className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-blue-500 whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-blue-500 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <span>
                 Execute {activeSignal.plan.signal} {activeSignal.symbol}
               </span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Free ntfy Phone Push Alerts Bar */}
+      <div className="flex flex-col gap-2.5 border-b border-slate-800/80 bg-[#0B0F17]/60 px-5 py-3 text-xs lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Bell className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
+            <span className="font-medium text-slate-200">ntfy Free Push:</span>
+            <button
+              type="button"
+              onClick={() =>
+                onUpdateConfig({
+                  ntfyAlertsEnabled: !demoAccount.config.ntfyAlertsEnabled,
+                })
+              }
+              className={`rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                demoAccount.config.ntfyAlertsEnabled
+                  ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                  : 'border-slate-700 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {demoAccount.config.ntfyAlertsEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              value={demoAccount.config.ntfyTopic}
+              onChange={(e) => onUpdateConfig({ ntfyTopic: e.target.value })}
+              placeholder="stratadesk-yourname-7294"
+              aria-label="ntfy topic name"
+              className="w-52 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1 font-mono text-[11px] text-slate-100 placeholder:text-slate-500 focus:border-blue-500 focus:outline-none"
+            />
+            <button
+              type="button"
+              onClick={onGenerateNtfyTopic}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1 text-[11px] font-medium text-slate-200 hover:border-slate-500 hover:text-white whitespace-nowrap cursor-pointer"
+            >
+              <Sparkles className="h-3 w-3 text-blue-400" aria-hidden="true" />
+              <span>Generate</span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400">Notify:</span>
+            <div
+              role="group"
+              aria-label="ntfy alert filter"
+              className="flex items-center gap-1 rounded-md border border-slate-800 bg-[#0B0F17] p-0.5"
+            >
+              <button
+                type="button"
+                onClick={() => onUpdateConfig({ ntfyNotifyWait: false })}
+                className={`rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                  !demoAccount.config.ntfyNotifyWait
+                    ? 'bg-slate-800 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                BUY / SELL Only
+              </button>
+              <button
+                type="button"
+                onClick={() => onUpdateConfig({ ntfyNotifyWait: true })}
+                className={`rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                  demoAccount.config.ntfyNotifyWait
+                    ? 'bg-slate-800 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                All Scans (incl. WAIT)
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-[11px] text-slate-400">
+            {ntfyFeedback
+              ? ntfyFeedback
+              : ntfyReady
+              ? '100% free via ntfy.sh'
+              : 'Enter or generate a topic and subscribe in the free ntfy app.'}
+          </span>
+
+          <button
+            type="button"
+            onClick={onTestNtfy}
+            disabled={ntfySending || !ntfyReady}
+            title={
+              ntfyReady
+                ? 'Send a test ntfy notification to your phone'
+                : 'Enter or generate an ntfy topic first'
+            }
+            className="inline-flex min-h-[32px] items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 transition-colors hover:bg-emerald-500/20 disabled:opacity-40 whitespace-nowrap cursor-pointer"
+          >
+            <Bell className="h-3 w-3" aria-hidden="true" />
+            <span>{ntfySending ? 'Sending...' : 'Test ntfy'}</span>
+          </button>
+
+          {smsStatus?.configured && (
+            <button
+              type="button"
+              onClick={onTestSms}
+              disabled={smsSending}
+              title={`Send test SMS via ${smsStatus.provider} (${smsStatus.recipientMasked})`}
+              className="inline-flex min-h-[32px] items-center gap-1.5 rounded-md border border-slate-700 bg-[#0B0F17] px-2.5 py-1 text-[11px] font-medium text-slate-300 transition-colors hover:border-slate-500 hover:text-white disabled:opacity-40 whitespace-nowrap cursor-pointer"
+            >
+              <MessageSquare className="h-3 w-3" aria-hidden="true" />
+              <Send className="h-3 w-3" aria-hidden="true" />
+              <span>{smsSending ? 'Sending...' : 'Test SMS'}</span>
             </button>
           )}
         </div>

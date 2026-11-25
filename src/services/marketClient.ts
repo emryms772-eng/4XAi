@@ -1,11 +1,20 @@
+import {
+  generateLocalBacktestReview,
+  generateLocalMtfSignal,
+} from '../analysis/localSignalEngine';
+import { analyzePriceAction } from '../analysis/priceAction';
+import { getInstrumentBySymbol } from '../config/instruments';
 import type {
   AIBacktestReview,
   AIPriceActionSignal,
   BacktestResult,
   MarketCandlesResponse,
+  MarketScanResponse,
   MarketTickEvent,
+  NtfyConfigStatus,
   OHLCVCandle,
   PriceActionAnalysisSummary,
+  SmsConfigStatus,
   Timeframe,
   WatchlistQuote,
 } from '../types/market';
@@ -167,14 +176,79 @@ export async function requestPriceActionSignal(params: {
   timeframe: Timeframe;
   candles: OHLCVCandle[];
 }): Promise<SignalResponse> {
-  const res = await fetch('/api/analysis/signal', {
+  try {
+    const res = await fetch('/api/analysis/signal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    return await parseJsonSafe<SignalResponse>(
+      res,
+      'Failed to generate AI price-action signal'
+    );
+  } catch (serverErr) {
+    const serverMessage =
+      serverErr instanceof Error
+        ? serverErr.message
+        : 'Server AI signal generation failed.';
+
+    try {
+      const instrument = getInstrumentBySymbol(params.symbol);
+      const orderedTfs: Timeframe[] = ['4H', '1H', '15M', '5M', '1M'];
+      const timeframesData = await Promise.all(
+        orderedTfs.map(async (tf) => {
+          if (tf === params.timeframe && params.candles.length >= 180) {
+            return {
+              timeframe: tf,
+              candles: params.candles,
+              analysis: analyzePriceAction(params.candles, instrument.decimals, {
+                timeframe: tf,
+              }),
+            };
+          }
+          const loaded = await fetchMarketCandles(
+            instrument.symbol,
+            tf,
+            tf === '5M' ? 240 : 200
+          );
+          return {
+            timeframe: tf,
+            candles: loaded.candles,
+            analysis: loaded.priceAction,
+          };
+        })
+      );
+
+      const activeEntry =
+        timeframesData.find((t) => t.timeframe === params.timeframe) ??
+        timeframesData[0];
+
+      const signal = generateLocalMtfSignal({
+        symbol: instrument.symbol,
+        activeTimeframe: params.timeframe,
+        timeframesData,
+      });
+
+      return {
+        priceAction: activeEntry.analysis,
+        signal,
+      };
+    } catch (localErr) {
+      const localMessage =
+        localErr instanceof Error ? localErr.message : String(localErr);
+      throw new Error(`${serverMessage} Local MTF fallback failed: ${localMessage}`);
+    }
+  }
+}
+
+export async function requestMarketSniperScan(): Promise<MarketScanResponse> {
+  const res = await fetch('/api/analysis/scan-market', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
   });
-  return parseJsonSafe<SignalResponse>(
+  return parseJsonSafe<MarketScanResponse>(
     res,
-    'Failed to generate AI price-action signal'
+    'Failed to run AI market sniper scan'
   );
 }
 
@@ -190,8 +264,145 @@ export async function requestPriceActionBacktest(params: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
-  return parseJsonSafe<BacktestResponse>(
+  const data = await parseJsonSafe<BacktestResponse>(
     res,
     'Failed to run causal price-action backtest'
   );
+
+  if (params.includeAiReview && !data.aiReview) {
+    return {
+      ...data,
+      aiReview: generateLocalBacktestReview(data.backtest),
+      aiError: null,
+    };
+  }
+
+  return data;
+}
+
+export async function fetchSmsStatus(): Promise<SmsConfigStatus> {
+  const res = await fetch('/api/notifications/sms');
+  return parseJsonSafe<SmsConfigStatus>(
+    res,
+    'Failed to check SMS alert status'
+  );
+}
+
+export async function sendSmsSignalAlert(
+  signal: AIPriceActionSignal
+): Promise<{ ok: boolean; sent?: boolean; deduplicated?: boolean; provider?: string }> {
+  const res = await fetch('/api/notifications/sms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ signal }),
+  });
+  return parseJsonSafe<{
+    ok: boolean;
+    sent?: boolean;
+    deduplicated?: boolean;
+    provider?: string;
+  }>(res, 'Failed to send SMS signal alert');
+}
+
+export async function sendSmsTestAlert(): Promise<{
+  ok: boolean;
+  sent?: boolean;
+  provider?: string;
+}> {
+  const res = await fetch('/api/notifications/sms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'test' }),
+  });
+  return parseJsonSafe<{ ok: boolean; sent?: boolean; provider?: string }>(
+    res,
+    'Failed to send test SMS message'
+  );
+}
+
+export async function fetchNtfyStatus(): Promise<NtfyConfigStatus> {
+  const res = await fetch('/api/notifications/ntfy');
+  return parseJsonSafe<NtfyConfigStatus>(
+    res,
+    'Failed to check ntfy alert status'
+  );
+}
+
+export async function sendNtfySignalAlert(
+  signal: AIPriceActionSignal,
+  topic?: string
+): Promise<{ ok: boolean; sent?: boolean; deduplicated?: boolean; topic?: string }> {
+  const res = await fetch('/api/notifications/ntfy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      signal,
+      ...(topic?.trim() ? { topic: topic.trim() } : {}),
+    }),
+  });
+  return parseJsonSafe<{
+    ok: boolean;
+    sent?: boolean;
+    deduplicated?: boolean;
+    topic?: string;
+  }>(res, 'Failed to send ntfy alert');
+}
+
+export async function sendNtfyTestAlert(topic?: string): Promise<{
+  ok: boolean;
+  sent?: boolean;
+  topic?: string;
+  serverUrl?: string;
+}> {
+  const res = await fetch('/api/notifications/ntfy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'test',
+      ...(topic?.trim() ? { topic: topic.trim() } : {}),
+    }),
+  });
+  return parseJsonSafe<{
+    ok: boolean;
+    sent?: boolean;
+    topic?: string;
+    serverUrl?: string;
+  }>(res, 'Failed to send test ntfy push');
+}
+
+export async function sendNtfyScanDigest(
+  scan: MarketScanResponse,
+  topic?: string
+): Promise<{ ok: boolean; sent?: boolean; deduplicated?: boolean; topic?: string }> {
+  const res = await fetch('/api/notifications/ntfy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      action: 'digest',
+      scan,
+      ...(topic?.trim() ? { topic: topic.trim() } : {}),
+    }),
+  });
+  return parseJsonSafe<{
+    ok: boolean;
+    sent?: boolean;
+    deduplicated?: boolean;
+    topic?: string;
+  }>(res, 'Failed to send ntfy scan digest');
+}
+
+export async function syncNtfySubscription(
+  topic: string,
+  enabled: boolean,
+  notifyWait = true
+): Promise<void> {
+  try {
+    await fetch('/api/notifications/ntfy/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic: topic.trim(), enabled, notifyWait }),
+    });
+  } catch {
+    // Non-blocking subscription sync
+  }
 }

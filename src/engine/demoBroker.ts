@@ -1,9 +1,11 @@
+import { evaluateSignalEntryTiming } from '../analysis/entryTiming';
 import { getInstrumentBySymbol } from '../config/instruments';
 import type {
   AIPriceActionSignal,
   ClosedDemoTrade,
   DemoAccountState,
   DemoPosition,
+  OHLCVCandle,
   TradeCloseReason,
 } from '../types/market';
 
@@ -21,6 +23,12 @@ export function createInitialDemoState(): DemoAccountState {
       autoScanIntervalSec: 0,
       scanScope: 'active',
       riskPercentPerTrade: 1,
+      ntfyAlertsEnabled: true,
+      ntfyTopic: '',
+      ntfyNotifyWait: true,
+      ntfyAllScansInitialized: true,
+      smsAlertsEnabled: false,
+      smsNotifyWait: false,
     },
   };
 }
@@ -32,6 +40,14 @@ export function loadDemoAccountState(): DemoAccountState {
     if (!raw) return createInitialDemoState();
     const parsed = JSON.parse(raw) as Partial<DemoAccountState>;
     const base = createInitialDemoState();
+    const mergedConfig = {
+      ...base.config,
+      ...(parsed.config ?? {}),
+    };
+    if (!parsed.config?.ntfyAllScansInitialized) {
+      mergedConfig.ntfyNotifyWait = true;
+      mergedConfig.ntfyAllScansInitialized = true;
+    }
     return {
       initialBalance: parsed.initialBalance ?? base.initialBalance,
       balance:
@@ -44,10 +60,7 @@ export function loadDemoAccountState(): DemoAccountState {
       closedTrades: Array.isArray(parsed.closedTrades)
         ? parsed.closedTrades
         : [],
-      config: {
-        ...base.config,
-        ...(parsed.config ?? {}),
-      },
+      config: mergedConfig,
     };
   } catch {
     return createInitialDemoState();
@@ -100,16 +113,48 @@ function computePositionUnits(
   return Math.round(capped * 1000) / 1000;
 }
 
+export interface ExecuteDemoSignalOptions {
+  formingCandle?: OHLCVCandle | null;
+  nowSec?: number;
+}
+
 export function executeSignalInDemoAccount(
   state: DemoAccountState,
   signal: AIPriceActionSignal,
-  liveSpotPrice: number
-): { nextState: DemoAccountState; actionSummary: string } {
+  liveSpotPrice: number,
+  options: ExecuteDemoSignalOptions = {}
+): { nextState: DemoAccountState; actionSummary: string; executed: boolean } {
   const { plan } = signal;
   if (plan.signal === 'WAIT') {
     return {
       nextState: state,
-      actionSummary: `${signal.symbol} signal is WAIT — no demo order placed.`,
+      actionSummary: `${signal.symbol} signal is WAIT — candle close confirmation required.`,
+      executed: false,
+    };
+  }
+
+  if (!signal.isLockedToClosedBar || signal.confirmedBarTime <= 0) {
+    return {
+      nextState: state,
+      actionSummary: `${signal.symbol} rejected — candle close confirmation only.`,
+      executed: false,
+    };
+  }
+
+  const execPriceCheck =
+    liveSpotPrice > 0 ? liveSpotPrice : signal.spotPriceAtSignal;
+  const timing = evaluateSignalEntryTiming({
+    signal,
+    livePrice: execPriceCheck,
+    formingCandle: options.formingCandle ?? null,
+    nowSec: options.nowSec,
+  });
+
+  if (timing.decision !== 'ENTER_NOW') {
+    return {
+      nextState: state,
+      actionSummary: `${signal.symbol} held (Candle Close Only): ${timing.headline}`,
+      executed: false,
     };
   }
 
@@ -163,6 +208,7 @@ export function executeSignalInDemoAccount(
       return {
         nextState: state,
         actionSummary: `Signal already executed for ${signal.symbol}.`,
+        executed: false,
       };
     }
 
@@ -188,7 +234,8 @@ export function executeSignalInDemoAccount(
           ...state,
           openPositions: workingOpen,
         },
-        actionSummary: `Updated existing ${side} ${signal.symbol} SL/TP from new ${signal.signalTimeframe} signal.`,
+        actionSummary: `Updated existing ${side} ${signal.symbol} SL/TP from new closed ${signal.signalTimeframe} signal.`,
+        executed: true,
       };
     }
 
@@ -230,6 +277,7 @@ export function executeSignalInDemoAccount(
         closedTrades: workingClosed,
       },
       actionSummary: `Max 3 concurrent demo positions active; close one before opening ${signal.symbol}.`,
+      executed: false,
     };
   }
 
@@ -270,7 +318,8 @@ export function executeSignalInDemoAccount(
     },
     actionSummary: `Opened Demo ${side} ${signal.symbol} @ ${entryPrice.toFixed(
       instrument.decimals
-    )} (${signal.signalTimeframe}).`,
+    )} (Closed ${signal.signalTimeframe} Confirmed).`,
+    executed: true,
   };
 }
 

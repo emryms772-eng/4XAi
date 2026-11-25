@@ -14,7 +14,10 @@ import {
 } from 'lightweight-charts';
 import { Eye, EyeOff, RotateCcw } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { TIMEFRAMES } from '../config/instruments';
+import type { CausalSignalArrow } from '../analysis/backtester';
+import { formatCountdown } from '../analysis/entryTiming';
+import { getCandleProgress } from '../analysis/priceAction';
+import { TIMEFRAMES, TIMEFRAME_SECONDS } from '../config/instruments';
 import type {
   AIPriceActionSignal,
   DemoPosition,
@@ -32,9 +35,39 @@ interface CandlestickChartProps {
   candles: OHLCVCandle[];
   priceAction: PriceActionAnalysisSummary;
   activeSignal: AIPriceActionSignal | null;
+  signalHistory?: AIPriceActionSignal[];
+  causalArrows?: CausalSignalArrow[];
   openPosition?: DemoPosition | null;
   isLoading: boolean;
   onTimeframeChange: (tf: Timeframe) => void;
+}
+
+function mapConfirmedTimeToChartBar(
+  orderedCandles: OHLCVCandle[],
+  targetSec: number,
+  timeframe: Timeframe
+): number | null {
+  if (orderedCandles.length === 0 || !Number.isFinite(targetSec) || targetSec <= 0) {
+    return null;
+  }
+  const tfSec = TIMEFRAME_SECONDS[timeframe];
+  const bucketed = Math.floor(targetSec / tfSec) * tfSec;
+
+  const exact = orderedCandles.find((c) => c.time === bucketed);
+  if (exact) return exact.time;
+
+  // Find enclosing bar or nearest prior bar within chart window
+  const firstTime = orderedCandles[0].time;
+  const lastTime = orderedCandles[orderedCandles.length - 1].time;
+  if (targetSec < firstTime) return null;
+  if (targetSec >= lastTime) return lastTime;
+
+  for (let i = orderedCandles.length - 1; i >= 0; i--) {
+    if (orderedCandles[i].time <= targetSec) {
+      return orderedCandles[i].time;
+    }
+  }
+  return null;
 }
 
 export function CandlestickChart({
@@ -44,6 +77,8 @@ export function CandlestickChart({
   candles,
   priceAction,
   activeSignal,
+  signalHistory = [],
+  causalArrows = [],
   openPosition,
   isLoading,
   onTimeframeChange,
@@ -59,13 +94,53 @@ export function CandlestickChart({
   const [showSR, setShowSR] = useState(true);
   const [showZones, setShowZones] = useState(true);
   const [showMarkers, setShowMarkers] = useState(true);
+  const [showArrows, setShowArrows] = useState(true);
   const [showSignalLines, setShowSignalLines] = useState(true);
   const [hoveredBar, setHoveredBar] = useState<OHLCVCandle | null>(null);
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowSec(Math.floor(Date.now() / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const candleCountdown = useMemo(
+    () => formatCountdown(getCandleProgress(timeframe, nowSec).secondsRemaining),
+    [timeframe, nowSec]
+  );
+
+  const orderedCandles = useMemo(() => {
+    const valid = candles.filter(
+      (c) =>
+        Number.isFinite(c.time) &&
+        Number.isFinite(c.open) &&
+        Number.isFinite(c.high) &&
+        Number.isFinite(c.low) &&
+        Number.isFinite(c.close)
+    );
+    if (valid.length <= 1) return valid;
+
+    const sorted = valid.slice().sort((a, b) => a.time - b.time);
+    const deduped: OHLCVCandle[] = [];
+    for (const bar of sorted) {
+      const prev = deduped[deduped.length - 1];
+      if (prev && prev.time === bar.time) {
+        deduped[deduped.length - 1] = bar;
+      } else {
+        deduped.push(bar);
+      }
+    }
+    return deduped;
+  }, [candles]);
 
   const displayBar = useMemo(() => {
     if (hoveredBar) return hoveredBar;
-    return candles.length > 0 ? candles[candles.length - 1] : null;
-  }, [hoveredBar, candles]);
+    return orderedCandles.length > 0
+      ? orderedCandles[orderedCandles.length - 1]
+      : null;
+  }, [hoveredBar, orderedCandles]);
 
   // Initialize pure price-action Candlestick chart
   useEffect(() => {
@@ -153,7 +228,7 @@ export function CandlestickChart({
         setHoveredBar(null);
         return;
       }
-      const match = candles.find((c) => c.time === param.time);
+      const match = orderedCandles.find((c) => c.time === param.time);
       setHoveredBar(match ?? null);
     };
 
@@ -161,7 +236,7 @@ export function CandlestickChart({
     return () => {
       chart.unsubscribeCrosshairMove(handler);
     };
-  }, [candles]);
+  }, [orderedCandles]);
 
   // Apply instrument price precision
   useEffect(() => {
@@ -181,12 +256,12 @@ export function CandlestickChart({
   useEffect(() => {
     const chart = chartRef.current;
     const candleSeries = candleSeriesRef.current;
-    if (!chart || !candleSeries || candles.length === 0) {
+    if (!chart || !candleSeries || orderedCandles.length === 0) {
       return;
     }
 
-    const datasetKey = `${symbol}:${timeframe}:${candles[0].time}`;
-    const lastBar = candles[candles.length - 1];
+    const datasetKey = `${symbol}:${timeframe}:${orderedCandles[0].time}`;
+    const lastBar = orderedCandles[orderedCandles.length - 1];
     const isFullReset =
       lastDatasetKeyRef.current !== datasetKey ||
       lastBarTimeRef.current === 0 ||
@@ -194,7 +269,7 @@ export function CandlestickChart({
 
     if (isFullReset) {
       candleSeries.setData(
-        candles.map((c) => ({
+        orderedCandles.map((c) => ({
           time: c.time as UTCTimestamp,
           open: c.open,
           high: c.high,
@@ -215,28 +290,127 @@ export function CandlestickChart({
       });
       lastBarTimeRef.current = lastBar.time;
     }
-  }, [symbol, timeframe, candles]);
+  }, [symbol, timeframe, orderedCandles]);
 
-  // Plot Pure Price Action Markers (BOS, CHoCH, Sweep, Engulfing, Pin Bar)
+  // Plot Pure Price Action Markers (BOS, CHoCH, Sweep, ENG, PIN) + Confirmed Signal Arrows
   useEffect(() => {
     const plugin = markersPluginRef.current;
     if (!plugin) return;
 
-    if (!showMarkers || priceAction.markers.length === 0) {
-      plugin.setMarkers([]);
-      return;
+    const merged: SeriesMarker<Time>[] = [];
+    const seenKeys = new Set<string>();
+
+    const pushUnique = (marker: SeriesMarker<Time>) => {
+      const key = `${String(marker.time)}:${marker.text ?? ''}:${marker.shape}`;
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
+      merged.push(marker);
+    };
+
+    if (showMarkers && priceAction.markers.length > 0) {
+      for (const m of priceAction.markers) {
+        if (!Number.isFinite(m.time)) continue;
+        pushUnique({
+          time: m.time as UTCTimestamp,
+          position: m.position,
+          color: m.color,
+          shape: m.shape,
+          text: m.text,
+        });
+      }
     }
 
-    const formatted: SeriesMarker<Time>[] = priceAction.markers.map((m) => ({
-      time: m.time as UTCTimestamp,
-      position: m.position,
-      color: m.color,
-      shape: m.shape,
-      text: m.text,
-    }));
+    if (showArrows) {
+      const liveSignals = [activeSignal, ...signalHistory].filter(
+        (s): s is AIPriceActionSignal => Boolean(s && s.symbol === symbol)
+      );
 
-    plugin.setMarkers(formatted);
-  }, [showMarkers, priceAction.markers]);
+      const blockedWaitBar =
+        activeSignal &&
+        activeSignal.symbol === symbol &&
+        activeSignal.plan.signal === 'WAIT' &&
+        activeSignal.confirmedBarTime > 0
+          ? mapConfirmedTimeToChartBar(
+              orderedCandles,
+              activeSignal.confirmedBarTime,
+              timeframe
+            )
+          : null;
+
+      // 1. Confirmed BUY / SELL signal arrows from locked closed-bar scans only
+      const liveSignalBars = new Set<number>();
+      for (const sig of liveSignals) {
+        if (sig.plan.signal !== 'BUY' && sig.plan.signal !== 'SELL') continue;
+        if (!sig.isLockedToClosedBar || sig.confirmedBarTime <= 0) continue;
+        const barTime = mapConfirmedTimeToChartBar(
+          orderedCandles,
+          sig.confirmedBarTime,
+          timeframe
+        );
+        if (barTime === null) continue;
+        liveSignalBars.add(barTime);
+        const isBuy = sig.plan.signal === 'BUY';
+        pushUnique({
+          time: barTime as UTCTimestamp,
+          position: isBuy ? 'belowBar' : 'aboveBar',
+          color: isBuy ? '#22C55E' : '#EF4444',
+          shape: isBuy ? 'arrowUp' : 'arrowDown',
+          size: 2,
+          text: isBuy ? 'BUY ✓' : 'SELL ✓',
+        });
+      }
+
+      // 2. Active Demo position entry arrow if not already shown by liveSignals
+      if (openPosition && openPosition.symbol === symbol) {
+        const openSec = Math.floor(Date.parse(openPosition.openedAt) / 1000);
+        const openBar = mapConfirmedTimeToChartBar(
+          orderedCandles,
+          openSec,
+          timeframe
+        );
+        if (openBar !== null && !liveSignalBars.has(openBar)) {
+          const isBuy = openPosition.side === 'BUY';
+          pushUnique({
+            time: openBar as UTCTimestamp,
+            position: isBuy ? 'belowBar' : 'aboveBar',
+            color: isBuy ? '#22C55E' : '#EF4444',
+            shape: isBuy ? 'arrowUp' : 'arrowDown',
+            size: 2,
+            text: isBuy ? 'BUY' : 'SELL',
+          });
+        }
+      }
+
+      // 3. Causal closed-bar historical confirmation arrows across visible bars
+      for (const arrow of causalArrows) {
+        if (blockedWaitBar !== null && arrow.time === blockedWaitBar) continue;
+        if (liveSignalBars.has(arrow.time)) continue;
+        const isBuy = arrow.side === 'BUY';
+        pushUnique({
+          time: arrow.time as UTCTimestamp,
+          position: isBuy ? 'belowBar' : 'aboveBar',
+          color: isBuy ? '#10B981' : '#F43F5E',
+          shape: isBuy ? 'arrowUp' : 'arrowDown',
+          size: 2,
+          text: isBuy ? 'BUY' : 'SELL',
+        });
+      }
+    }
+
+    merged.sort((a, b) => Number(a.time) - Number(b.time));
+    plugin.setMarkers(merged);
+  }, [
+    showMarkers,
+    showArrows,
+    priceAction.markers,
+    activeSignal,
+    signalHistory,
+    causalArrows,
+    openPosition,
+    orderedCandles,
+    symbol,
+    timeframe,
+  ]);
 
   // Plot S/R Levels, Equilibrium, OB/FVG Zones, and AI Signal Entry/SL/TP Lines
   useEffect(() => {
@@ -420,7 +594,7 @@ export function CandlestickChart({
   return (
     <div className="rounded-lg border border-slate-800/90 bg-[#0B0F17] overflow-hidden">
       {/* Pure Price Action Chart Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/90 bg-[#111722] px-4 py-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/90 bg-[#111722] px-3 py-2 sm:px-4">
         <div
           role="group"
           aria-label="Chart timeframe"
@@ -433,7 +607,7 @@ export function CandlestickChart({
                 key={tf}
                 type="button"
                 onClick={() => onTimeframeChange(tf)}
-                className={`rounded px-2.5 py-1 text-xs font-mono font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`min-h-[34px] sm:min-h-0 rounded px-2.5 py-1 text-xs font-mono font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   active
                     ? 'bg-blue-600 text-white'
                     : 'text-slate-400 hover:text-slate-100'
@@ -445,11 +619,11 @@ export function CandlestickChart({
           })}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar max-w-full">
           <button
             type="button"
             onClick={() => setShowSR((v) => !v)}
-            className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showSR
                 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
                 : 'border-slate-800 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
@@ -460,13 +634,13 @@ export function CandlestickChart({
             ) : (
               <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-            <span>S/R &amp; 50% EQ</span>
+            <span>S/R</span>
           </button>
 
           <button
             type="button"
             onClick={() => setShowZones((v) => !v)}
-            className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showZones
                 ? 'border-sky-500/40 bg-sky-500/10 text-sky-300'
                 : 'border-slate-800 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
@@ -477,13 +651,13 @@ export function CandlestickChart({
             ) : (
               <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-            <span>OB / FVG</span>
+            <span>OB/FVG</span>
           </button>
 
           <button
             type="button"
             onClick={() => setShowMarkers((v) => !v)}
-            className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            className={`inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               showMarkers
                 ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
                 : 'border-slate-800 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
@@ -494,7 +668,24 @@ export function CandlestickChart({
             ) : (
               <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-            <span>BOS / Patterns</span>
+            <span>BOS</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowArrows((v) => !v)}
+            className={`inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              showArrows
+                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                : 'border-slate-800 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            {showArrows ? (
+              <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+              <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>Arrows</span>
           </button>
 
           {((activeSignal && activeSignal.symbol === symbol) ||
@@ -502,7 +693,7 @@ export function CandlestickChart({
             <button
               type="button"
               onClick={() => setShowSignalLines((v) => !v)}
-              className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 showSignalLines
                   ? 'border-blue-500/40 bg-blue-500/15 text-blue-300'
                   : 'border-slate-800 bg-[#0B0F17] text-slate-400 hover:text-slate-200'
@@ -513,7 +704,7 @@ export function CandlestickChart({
               ) : (
                 <EyeOff className="h-3.5 w-3.5" aria-hidden="true" />
               )}
-              <span>Trade Lines</span>
+              <span>Lines</span>
             </button>
           )}
 
@@ -521,7 +712,7 @@ export function CandlestickChart({
             type="button"
             onClick={handleResetView}
             title="Fit candles to viewport"
-            className="inline-flex items-center gap-1.5 rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-slate-700 hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex min-h-[34px] sm:min-h-0 items-center gap-1 rounded-md border border-slate-800 bg-[#0B0F17] px-2.5 py-1 text-xs font-medium text-slate-300 transition-colors hover:border-slate-700 hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
           >
             <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
             <span>Fit</span>
@@ -529,13 +720,10 @@ export function CandlestickChart({
         </div>
       </div>
 
-      {/* Pure OHLC Candlestick Viewport */}
-      <div className="relative h-[430px] sm:h-[480px] w-full bg-[#0B0F17]">
-        {displayBar && (
-          <div className="pointer-events-none absolute left-3 top-2.5 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded bg-[#0B0F17]/85 px-2.5 py-1 text-[11px] font-mono tabular-nums backdrop-blur-xs">
-            <span className="font-semibold text-slate-200">
-              {symbol} · {timeframe}
-            </span>
+      {/* Compact OHLC Readout Row */}
+      {displayBar && (
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-slate-800/70 bg-[#0D121C] px-3 py-1.5 sm:px-4 text-[11px] font-mono tabular-nums">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
             <span className="text-slate-400">
               O <span className="text-slate-100">{displayBar.open.toFixed(decimals)}</span>
             </span>
@@ -548,25 +736,25 @@ export function CandlestickChart({
             <span className="text-slate-400">
               C <span className="text-slate-100">{displayBar.close.toFixed(decimals)}</span>
             </span>
+          </div>
+          <div className="flex items-center gap-3 whitespace-nowrap">
             <span className="text-slate-400">
-              Range{' '}
-              <span className="text-slate-200">
-                {(displayBar.high - displayBar.low).toFixed(decimals)}
-              </span>
+              {timeframe} close{' '}
+              <span className="text-slate-200">{candleCountdown}</span>
             </span>
             <span className="text-sky-400">
               {priceAction.snapshot.latestStructureEvent}
             </span>
-            <span className="text-emerald-400">
-              Non-Repainting (Closed Bars)
-            </span>
           </div>
-        )}
+        </div>
+      )}
 
-        {isLoading && candles.length === 0 && (
+      {/* Pure OHLC Candlestick Viewport */}
+      <div className="relative h-[320px] sm:h-[430px] xl:h-[480px] w-full bg-[#0B0F17]">
+        {isLoading && orderedCandles.length === 0 && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#0B0F17]/80">
             <div className="text-xs font-mono text-slate-400">
-              Loading {symbol} {timeframe} raw price action...
+              Loading {symbol} {timeframe}...
             </div>
           </div>
         )}
