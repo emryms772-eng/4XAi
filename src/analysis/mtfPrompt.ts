@@ -255,9 +255,13 @@ export function buildMtfSignalPrompt(params: {
     '(3) Asset or company/instrument fundamentals (central bank/yield/ETF/supply shifts or major announcements; note truthfully that Synthetic indices have no macro/earnings);',
     '(4) Market sentiment and risk environment (risk-on vs risk-off cross-market tape, geopolitical or breaking news shocks);',
     '(5) Technical structure and market mechanics (key S/R, BOS/CHoCH breakouts, sweeps, liquidity targets across 4H, 1H, 15M, 5M, 1M).',
+    'SMART MONEY TOP-DOWN & SUPPLY/DEMAND FRAMEWORK:',
+    '- Top-Down Direction & Mitigation Control: Start from higher timeframes (4H/1H) to set dominant direction and key supply/demand zones. Track control via mitigation: mitigating a demand zone keeps demand in control; mitigating a supply zone keeps supply in control; breaking below a valid demand zone shifts control to supply.',
+    '- Zone Quality Criteria: Prioritize supply/demand zones backed by (a) inefficiency/FVG imbalance from fast movement, (b) Break of Structure (BoS) confirming momentum, and (c) strong pushed distance away from the zone before retracement. Refine entries with Order Blocks (origin candle of the impulsive FVG move) and check unfilled orders.',
+    '- Change of Character (ChoCH) Trap Filtering: Before treating a break past a swing/zone as a true reversal ChoCH, check historical context to the left for (a) a liquidity sweep of stop losses below/above a swing followed by re-entry into the range, or (b) an unmitigated FVG acting as a magnet for normal pullback/rebalance.',
     'RULES FOR CERTAINTY: Do NOT guess, invent prices/timeframes, or fill in missing chart/news/macro data. If fiveDriverScoutContext marks calendarAvailable=false or hasVerifiedExternalNews=false for a non-Synthetic asset, mark those driver verdicts as "Missing Data".',
     'Always populate confirmingFactors (what aligns with the setup), conflictingFactors (what opposes or creates risk), and requiredChecks (exact checks or chart/macro details needed first whenever issuing NO SIGNAL / WAIT).',
-    'WHEN TO OUTPUT NO SIGNAL ("WAIT"): Issue plan.signal = "WAIT" (NO SIGNAL) whenever ANY of the following occurs: (a) required macro/news/chart data is missing or contradictory; (b) sessionBlocked=true (weekend/rollover thin liquidity); (c) imminentHighImpactEvent or highImpactRiskDetected=true; (d) 4H/1H/15M HTF structure conflicts; (e) 5M lacks closed-bar OTE Discount (<=40% BUY) or Premium (>=60% SELL) + sweep/displacement confirmation; or (f) R:R < 1:2.5.',
+    'WHEN TO OUTPUT NO SIGNAL ("WAIT"): Issue plan.signal = "WAIT" (NO SIGNAL) whenever ANY of the following occurs: (a) required macro/news/chart data is missing or contradictory; (b) sessionBlocked=true (weekend/rollover thin liquidity); (c) imminentHighImpactEvent or highImpactRiskDetected=true; (d) HTF structure conflicts or a move looks like a liquidity sweep / FVG rebalance trap rather than a confirmed shift; (e) 5M lacks closed-bar OTE Discount (<=40% BUY) or Premium (>=60% SELL) + sweep/displacement confirmation; or (f) R:R < 1:2.5.',
     'EXECUTION RULE: Execution is ALWAYS strictly on the 5M timeframe (signalTimeframe = "5M") on CLOSED bars only. Only output BUY or SELL as an "A+ Setup" when multiple drivers align and key risks are accounted for.',
     'CRITICAL RULE: Do NOT use, mention, or rely on lagging indicators such as RSI, MACD, EMA, SMA, Stochastics, or Bollinger Bands.',
     'Provide marketDrivers (exactly 5 entries for drivers 1..5) and timeframeAlignment covering all 5 timeframes (4H, 1H, 15M, 5M, 1M).',
@@ -267,7 +271,7 @@ export function buildMtfSignalPrompt(params: {
     'Never promise guaranteed profits.',
   ].join(' ');
 
-  const userPrompt = `Evaluate all 5 market drivers (session/liquidity, macro/central bank, fundamentals, risk sentiment, and closed-bar 4H–1M technical structure) strictly without guessing missing data, state confirming vs conflicting factors, and output a 5M decision (BUY, SELL, or WAIT / NO SIGNAL):\n${payloadJson}`;
+  const userPrompt = `Evaluate all 5 market drivers (session/liquidity, macro/central bank, fundamentals, risk sentiment, and closed-bar 4H–1M technical structure) and Smart Money top-down/supply-demand/ChoCH rules strictly without guessing missing data, state confirming vs conflicting factors, and output a 5M decision (BUY, SELL, or WAIT / NO SIGNAL):\n${payloadJson}`;
 
   return {
     instrument,
