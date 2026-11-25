@@ -16,8 +16,8 @@ export interface UtcSessionContext {
 }
 
 /**
- * Computes exact UTC session liquidity and rollover/weekend guardrails
- * strictly from current UTC clock without guessing.
+- Computes exact UTC session liquidity and rollover/weekend guardrails
+- strictly from current UTC clock without guessing.
  */
 export function getUtcSessionContext(
   category: MarketCategory,
@@ -185,12 +185,21 @@ export function buildFallbackScoutContext(
 }
 
 function getRelevantCurrenciesForSymbol(symbol: string): string[] {
-  if (symbol === 'XAU/USD' || symbol === 'BTC/USD') return ['USD'];
+  if (symbol === 'XAU/USD' || symbol === 'XAG/USD' || symbol === 'BTC/USD' || symbol === 'ETH/USD') {
+    return ['USD'];
+  }
   const parts = symbol.split('/');
   if (parts.length === 2 && parts[0].length === 3 && parts[1].length === 3) {
     return parts;
   }
   return [];
+}
+
+function parseRiskRewardNumber(rrText: string): number | null {
+  const match = String(rrText ?? '').match(/1\s*:\s*(\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const val = Number(match[1]);
+  return Number.isFinite(val) ? val : null;
 }
 
 function scoreHeadlineBiasForSymbol(
@@ -215,7 +224,6 @@ function scoreHeadlineBiasForSymbol(
     const isBullText = bullWords.some((w) => lower.includes(w));
     const isBearText = bearWords.some((w) => lower.includes(w));
 
-    // For USD/JPY, USD/CHF, USD/CAD: USD strength news is bullish for the pair, while XAU/EUR/GBP/AUD/BTC rise on USD weakness
     const mentionsDollar = lower.includes('dollar') || lower.includes('fed') || lower.includes('federal reserve');
     if (base === 'USD' && mentionsDollar) {
       if (lower.includes('hike') || lower.includes('hawkish') || lower.includes('strong dollar')) {
@@ -247,10 +255,10 @@ export interface FiveDriverEvaluationResult {
 }
 
 /**
- * Deterministic 5-Driver Market Analyst & Certainty evaluator.
- * Combines live UTC session, economic calendar, fundamentals/news scout,
- * cross-market risk sentiment, and closed-bar MTF technicals.
- * Enforces NO SIGNAL whenever critical data is missing or drivers conflict materially.
+- Deterministic 5-Driver Market Analyst & Certainty evaluator.
+- Combines live UTC session, economic calendar, fundamentals/news scout,
+- cross-market risk sentiment, and closed-bar MTF technicals.
+- Enforces NO SIGNAL whenever critical data is missing or drivers conflict materially.
  */
 export function evaluateAllFiveDrivers(params: {
   symbol: string;
@@ -295,6 +303,12 @@ export function evaluateAllFiveDrivers(params: {
       ? 'SELL'
       : 'WAIT';
 
+  const rrNumeric = parseRiskRewardNumber(riskRewardRatio);
+  if (proposedAction !== 'WAIT' && rrNumeric !== null && rrNumeric < 2.5) {
+    conflictingFactors.push(`Risk-to-reward (${riskRewardRatio}) is below the 1:2.5 minimum threshold.`);
+    requiredChecks.push('Wait for a deeper discount/premium entry or clearer liquidity target offering at least 1:2.5 R:R.');
+  }
+
   // 1. Supply, demand, liquidity, and session/order-flow context
   const d1Evidence: string[] = [
     `${scout.sessionName}: ${scout.sessionLiquidityNote}`,
@@ -317,6 +331,10 @@ export function evaluateAllFiveDrivers(params: {
       d1Verdict = 'Bearish';
     } else {
       d1Verdict = 'Neutral';
+    }
+
+    if (snap.unmitigatedFvgCount > 0 && snap.recentSweep !== 'None') {
+      conflictingFactors.push(`Recent sweep (${snap.recentSweep}) with ${snap.unmitigatedFvgCount} unmitigated FVG(s) — verify whether price is sweeping liquidity or rebalancing an FVG before calling a ChoCH reversal.`);
     }
 
     if (evalSide === 'BUY') {
@@ -497,10 +515,10 @@ export function evaluateAllFiveDrivers(params: {
       a5m &&
       a15m.bias !== 'Neutral' &&
       a15m.bias === a5m.bias &&
-      ((a4h?.rangeZone === 'Discount' || a1h?.rangeZone === 'Discount') &&
-        a15m.bias === 'Bullish' ||
-        (a4h?.rangeZone === 'Premium' || a1h?.rangeZone === 'Premium') &&
-          a15m.bias === 'Bearish')
+      (((a4h?.rangeZone === 'Discount' || a1h?.rangeZone === 'Discount') &&
+        a15m.bias === 'Bullish') ||
+        ((a4h?.rangeZone === 'Premium' || a1h?.rangeZone === 'Premium') &&
+          a15m.bias === 'Bearish'))
   );
   const htfConflict = htfCoreOpposing && !htfReversalConfirmed;
 
@@ -616,7 +634,6 @@ export function evaluateAllFiveDrivers(params: {
     blockReason = 'NO SIGNAL — Macro / Fundamental Driver Conflicts With Setup';
   }
 
-  // Deduplicate lists cleanly
   const dedupe = (arr: string[]) => Array.from(new Set(arr.filter(Boolean))).slice(0, 6);
 
   return {
