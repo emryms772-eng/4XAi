@@ -3,9 +3,11 @@ import type {
   AIBacktestReview,
   AIPriceActionSignal,
   BacktestResult,
+  MarketScoutContext,
   Timeframe,
   TimeframeAlignmentItem,
 } from '../types/market.ts';
+import { evaluateAllFiveDrivers } from './marketContext.ts';
 import type { TimeframePriceActionInput } from './mtfPrompt.ts';
 import {
   extractHistoricalPriceActionTimeline,
@@ -123,8 +125,9 @@ export function generateLocalMtfSignal(params: {
   symbol: string;
   activeTimeframe: Timeframe;
   timeframesData: TimeframePriceActionInput[];
+  scoutContext?: MarketScoutContext | null;
 }): AIPriceActionSignal {
-  const { symbol, activeTimeframe, timeframesData } = params;
+  const { symbol, activeTimeframe, timeframesData, scoutContext = null } = params;
   const instrument = getInstrumentBySymbol(symbol);
   const d = instrument.decimals;
 
@@ -464,11 +467,6 @@ export function generateLocalMtfSignal(params: {
     ? `5M candle close below ${stopLoss.toFixed(d)} invalidates demand structure.`
     : `5M candle close above ${stopLoss.toFixed(d)} invalidates supply structure.`;
 
-  const priceActionNarrative =
-    signalAction === 'WAIT'
-      ? `Closed-bar 4H (${a4h?.bias ?? 'Neutral'}) and 1H (${a1h?.bias ?? 'Neutral'}) scan puts 5M at ${m5Snap.rangePositionPct}% (${m5Snap.rangeZone}) near ${spotPrice.toFixed(d)}. No A+ sniper entry yet—stay flat until price reaches ${entryPrice.toFixed(d)} and closes a confirmed ${planBullish ? 'sell-side sweep + bullish displacement' : 'buy-side sweep + bearish displacement'}.`
-      : `A+ Sniper confirmed strictly on closed bars: 4H/1H/15M align ${dominantBias} while 5M sits in ${m5Snap.rangeZone} (${m5Snap.rangePositionPct}%). ${bullConfirmations[0] || bearConfirmations[0] || 'Closed-bar 5M displacement'} locks ${signalAction} execution at ${entryPrice.toFixed(d)} targeting ${takeProfit1.toFixed(d)} and ${takeProfit2.toFixed(d)} (${riskRewardRatio}).`;
-
   const topLevels = m5Entry.analysis.levels
     .slice(0, 3)
     .map((l) => `${l.type} @ ${l.price.toFixed(d)}`)
@@ -487,6 +485,43 @@ export function generateLocalMtfSignal(params: {
     note: a.note,
   }));
 
+  const driverEval = evaluateAllFiveDrivers({
+    symbol: instrument.symbol,
+    proposedAction: signalAction,
+    bias: dominantBias,
+    m5Analysis: m5Entry.analysis,
+    timeframeAlignment,
+    riskRewardRatio,
+    scout: scoutContext,
+  });
+
+  if (driverEval.shouldBlockSignal && signalAction !== 'WAIT') {
+    signalAction = 'WAIT';
+    signalStrength = 'Developing';
+    setupType =
+      driverEval.blockReason ?? 'NO SIGNAL — Unmet Multi-Driver Certainty';
+    triggerPattern =
+      driverEval.requiredChecks[0] ?? 'Resolve conflicting or missing checks first';
+  }
+
+  const analystVerdict: AIPriceActionSignal['analystVerdict'] =
+    signalAction === 'BUY' ? 'BUY' : signalAction === 'SELL' ? 'SELL' : 'NO SIGNAL';
+
+  const finalNarrative =
+    signalAction === 'WAIT'
+      ? `${
+          driverEval.blockReason ? `${driverEval.blockReason}. ` : ''
+        }Closed-bar 4H (${a4h?.bias ?? 'Neutral'}) & 1H (${a1h?.bias ?? 'Neutral'}) scan puts 5M at ${m5Snap.rangePositionPct}% (${m5Snap.rangeZone}) near ${spotPrice.toFixed(d)}. ${
+          driverEval.conflictingFactors[0]
+            ? `Conflict/Risk: ${driverEval.conflictingFactors[0]} `
+            : ''
+        }${
+          driverEval.requiredChecks[0]
+            ? `Check first: ${driverEval.requiredChecks[0]}`
+            : ''
+        }`
+      : `All 5 drivers cleared on closed bars: ${scoutContext?.sessionName ?? 'Active session'}, macro clear (${scoutContext?.crossMarketRiskTone ?? 'Aligned'}), and 4H/1H/15M align ${dominantBias} in 5M ${m5Snap.rangeZone} (${m5Snap.rangePositionPct}%). ${bullConfirmations[0] || bearConfirmations[0] || 'Closed-bar 5M displacement'} locks ${signalAction} at ${entryPrice.toFixed(d)} targeting ${takeProfit1.toFixed(d)} / ${takeProfit2.toFixed(d)} (${riskRewardRatio}).`;
+
   return {
     id: `sig-${instrument.symbol.replace('/', '')}-${confirmedBarTime || Date.now()}`,
     symbol: instrument.symbol,
@@ -499,9 +534,15 @@ export function generateLocalMtfSignal(params: {
     model: 'Local Sniper MTF (Free Forever)',
     spotPriceAtSignal: spotPrice,
     bias: dominantBias,
-    priceActionNarrative,
+    analystVerdict,
+    priceActionNarrative: finalNarrative,
     keyZonesExplanation,
     timeframeAlignment,
+    marketDrivers: driverEval.marketDrivers,
+    confirmingFactors: driverEval.confirmingFactors,
+    conflictingFactors: driverEval.conflictingFactors,
+    requiredChecks: driverEval.requiredChecks,
+    scoutedSources: scoutContext?.sources?.slice(0, 6),
     plan: {
       signal: signalAction,
       signalStrength,
@@ -526,10 +567,43 @@ export function generateLocalMtfSignal(params: {
 export function enforceSniperDiscipline(params: {
   signal: AIPriceActionSignal;
   timeframesData: TimeframePriceActionInput[];
+  scoutContext?: MarketScoutContext | null;
 }): AIPriceActionSignal {
-  const { signal, timeframesData } = params;
+  const { signal, timeframesData, scoutContext = null } = params;
+  const byTf = new Map(timeframesData.map((t) => [t.timeframe, t]));
+  const m5Entry = byTf.get('5M') ?? timeframesData[0];
+
+  const driverEval = m5Entry
+    ? evaluateAllFiveDrivers({
+        symbol: signal.symbol,
+        proposedAction: signal.plan.signal,
+        bias: signal.bias,
+        m5Analysis: m5Entry.analysis,
+        timeframeAlignment: signal.timeframeAlignment,
+        riskRewardRatio: signal.plan.riskRewardRatio,
+        scout: scoutContext,
+      })
+    : null;
+
   if (signal.plan.signal === 'WAIT') {
-    return signal;
+    return {
+      ...signal,
+      analystVerdict: 'NO SIGNAL',
+      marketDrivers:
+        signal.marketDrivers?.length === 5
+          ? signal.marketDrivers
+          : driverEval?.marketDrivers ?? [],
+      confirmingFactors: Array.from(
+        new Set([...(signal.confirmingFactors ?? []), ...(driverEval?.confirmingFactors ?? [])])
+      ).slice(0, 6),
+      conflictingFactors: Array.from(
+        new Set([...(signal.conflictingFactors ?? []), ...(driverEval?.conflictingFactors ?? [])])
+      ).slice(0, 6),
+      requiredChecks: Array.from(
+        new Set([...(signal.requiredChecks ?? []), ...(driverEval?.requiredChecks ?? [])])
+      ).slice(0, 6),
+      scoutedSources: signal.scoutedSources ?? scoutContext?.sources?.slice(0, 6),
+    };
   }
 
   const { plan } = signal;
@@ -547,11 +621,9 @@ export function enforceSniperDiscipline(params: {
   const reward2 = Math.abs(tp2 - entry);
   const rr = risk > 0 ? reward2 / risk : 0;
 
-  const byTf = new Map(timeframesData.map((t) => [t.timeframe, t]));
   const d = getInstrumentBySymbol(signal.symbol).decimals;
   const a4h = byTf.get('4H') ? assessTimeframe(byTf.get('4H')!, d) : null;
   const a1h = byTf.get('1H') ? assessTimeframe(byTf.get('1H')!, d) : null;
-  const m5Entry = byTf.get('5M');
   const m5Closed = m5Entry
     ? getClosedCandlesForTimeframe(m5Entry.candles, '5M')
     : [];
@@ -587,6 +659,7 @@ export function enforceSniperDiscipline(params: {
     plan.signalStrength !== 'A+ Setup' || plan.confluences.length < 3;
 
   if (
+    driverEval?.shouldBlockSignal ||
     missingClosedLock ||
     !validGeometry ||
     rr < 2.2 ||
@@ -599,6 +672,7 @@ export function enforceSniperDiscipline(params: {
       symbol: signal.symbol,
       activeTimeframe: signal.timeframe,
       timeframesData,
+      scoutContext,
     });
     if (localStrict.plan.signal === 'WAIT') {
       return {
@@ -612,7 +686,24 @@ export function enforceSniperDiscipline(params: {
     };
   }
 
-  return signal;
+  return {
+    ...signal,
+    analystVerdict: signal.plan.signal,
+    marketDrivers:
+      signal.marketDrivers?.length === 5
+        ? signal.marketDrivers
+        : driverEval?.marketDrivers ?? [],
+    confirmingFactors: Array.from(
+      new Set([...(signal.confirmingFactors ?? []), ...(driverEval?.confirmingFactors ?? [])])
+    ).slice(0, 6),
+    conflictingFactors: Array.from(
+      new Set([...(signal.conflictingFactors ?? []), ...(driverEval?.conflictingFactors ?? [])])
+    ).slice(0, 6),
+    requiredChecks: Array.from(
+      new Set([...(signal.requiredChecks ?? []), ...(driverEval?.requiredChecks ?? [])])
+    ).slice(0, 6),
+    scoutedSources: signal.scoutedSources ?? scoutContext?.sources?.slice(0, 6),
+  };
 }
 
 /**

@@ -18,7 +18,8 @@ import {
 } from '../analysis/mtfPrompt.ts';
 import { analyzePriceAction, getCandleProgress } from '../analysis/priceAction.ts';
 import { MARKET_INSTRUMENTS, getInstrumentBySymbol } from '../config/instruments.ts';
-import { getMarketCandles } from './marketData.ts';
+import { getMarketCandles, getWatchlistQuotes } from './marketData.ts';
+import { scoutMarketContext } from './marketScout.ts';
 import type {
   AIBacktestReview,
   AIPriceActionSignal,
@@ -185,6 +186,49 @@ async function runGeminiModel(
             },
             description: 'All 5 timeframes ordered 4H, 1H, 15M, 5M, 1M.',
           },
+          marketDrivers: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                id: { type: Type.INTEGER, description: 'Driver number 1 to 5.' },
+                driver: { type: Type.STRING, description: 'Driver category title.' },
+                verdict: {
+                  type: Type.STRING,
+                  description:
+                    'Bullish, Bearish, Neutral, Conflicting, or Missing Data.',
+                },
+                summary: {
+                  type: Type.STRING,
+                  description: '1 concise factual sentence evaluating this driver.',
+                },
+                evidence: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                  description: '1 to 3 observed facts or data points.',
+                },
+              },
+              required: ['id', 'driver', 'verdict', 'summary', 'evidence'],
+            },
+            description: 'Evaluation of all 5 market drivers (1..5).',
+          },
+          confirmingFactors: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description: 'Exact factors confirming the setup across the 5 drivers.',
+          },
+          conflictingFactors: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description:
+              'Exact factors conflicting with the setup or key macro/structural risks.',
+          },
+          requiredChecks: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description:
+              'Exact checks or chart/macro/news details needed before issuing a directional signal (especially when WAIT / NO SIGNAL).',
+          },
           plan: {
             type: Type.OBJECT,
             properties: {
@@ -262,6 +306,10 @@ async function runGeminiModel(
           'priceActionNarrative',
           'keyZonesExplanation',
           'timeframeAlignment',
+          'marketDrivers',
+          'confirmingFactors',
+          'conflictingFactors',
+          'requiredChecks',
           'plan',
         ],
       },
@@ -421,6 +469,35 @@ export async function generatePriceActionSignal(params: {
   const geminiKey = getGeminiApiKey();
   const groqKey = getGroqApiKey();
 
+  const m5Entry =
+    timeframesData.find((t) => t.timeframe === '5M') ??
+    timeframesData.find((t) => t.timeframe === activeTimeframe) ??
+    timeframesData[0];
+  const m5Closed = m5Entry
+    ? m5Entry.candles.filter((c) => c.time < getCandleProgress('5M').bucketStartSec)
+    : [];
+  const prelimBarTime = m5Closed[m5Closed.length - 1]?.time ?? 0;
+
+  // Strict non-repainting lock: return the exact signal locked to this closed 5M candle
+  const cacheKey = `${instrument.symbol}:${prelimBarTime}`;
+  const cached = signalCache.get(cacheKey);
+  if (
+    cached &&
+    prelimBarTime > 0 &&
+    Date.now() - cached.createdAt < SIGNAL_CACHE_TTL_MS
+  ) {
+    return {
+      ...cached.signal,
+      timeframe: activeTimeframe,
+    };
+  }
+
+  const scoutContext = await scoutMarketContext({
+    symbol: instrument.symbol,
+    includeDeepSearch: Boolean(geminiKey),
+    batchMode: false,
+  });
+
   const {
     currentPrice,
     confirmedBarTime,
@@ -431,21 +508,8 @@ export async function generatePriceActionSignal(params: {
     symbol,
     activeTimeframe,
     timeframesData,
+    scoutContext,
   });
-
-  // Strict non-repainting lock: return the exact signal locked to this closed 5M candle
-  const cacheKey = `${instrument.symbol}:${confirmedBarTime}`;
-  const cached = signalCache.get(cacheKey);
-  if (
-    cached &&
-    confirmedBarTime > 0 &&
-    Date.now() - cached.createdAt < SIGNAL_CACHE_TTL_MS
-  ) {
-    return {
-      ...cached.signal,
-      timeframe: activeTimeframe,
-    };
-  }
 
   let parsed: RawSignalJSON | null = null;
   let usedModel = PRIMARY_MODEL;
@@ -491,7 +555,7 @@ export async function generatePriceActionSignal(params: {
     }
   }
 
-  // Unlimited, 100% Free Forever closed-bar MTF Sniper price-action fallback + strict Sniper gatekeeper
+  // Unlimited, 100% Free Forever closed-bar MTF Sniper price-action fallback + strict 5-Driver certainty gatekeeper
   const signal = parsed
     ? enforceSniperDiscipline({
         signal: normalizeSignalResult({
@@ -501,21 +565,26 @@ export async function generatePriceActionSignal(params: {
           currentPrice,
           confirmedBarTime,
           model: usedModel,
+          timeframesData,
+          scoutContext,
         }),
         timeframesData,
+        scoutContext,
       })
     : generateLocalMtfSignal({
         symbol: instrument.symbol,
         activeTimeframe,
         timeframesData,
+        scoutContext,
       });
 
+  const finalCacheKey = `${instrument.symbol}:${signal.confirmedBarTime || confirmedBarTime}`;
   if (signalCache.size > 60) {
     const oldestKey = signalCache.keys().next().value;
     if (oldestKey) signalCache.delete(oldestKey);
   }
 
-  signalCache.set(cacheKey, {
+  signalCache.set(finalCacheKey, {
     createdAt: Date.now(),
     confirmedBarTime: signal.confirmedBarTime || confirmedBarTime,
     signal,
@@ -563,6 +632,7 @@ export async function scanMarketSniperSetups(): Promise<MarketScanResponse> {
   marketScanInflight = (async () => {
     try {
       const orderedTfs: Timeframe[] = ['4H', '1H', '15M', '5M', '1M'];
+      const sharedWatchlistQuotes = await getWatchlistQuotes().catch(() => []);
       const allSignals: AIPriceActionSignal[] = [];
       const batchSize = 7;
 
@@ -570,19 +640,27 @@ export async function scanMarketSniperSetups(): Promise<MarketScanResponse> {
         const batch = MARKET_INSTRUMENTS.slice(i, i + batchSize);
         const batchResults = await Promise.all(
           batch.map(async (instrument) => {
-            const timeframesData: TimeframePriceActionInput[] = await Promise.all(
-              orderedTfs.map(async (tf) => {
-                const targetLimit = tf === '5M' ? 240 : 200;
-                const data = await getMarketCandles(instrument.symbol, tf, targetLimit);
-                return {
-                  timeframe: tf,
-                  candles: data.candles,
-                  analysis: analyzePriceAction(data.candles, instrument.decimals, {
+            const [timeframesData, scoutContext] = await Promise.all([
+              Promise.all(
+                orderedTfs.map(async (tf) => {
+                  const targetLimit = tf === '5M' ? 240 : 200;
+                  const data = await getMarketCandles(instrument.symbol, tf, targetLimit);
+                  return {
                     timeframe: tf,
-                  }),
-                };
-              })
-            );
+                    candles: data.candles,
+                    analysis: analyzePriceAction(data.candles, instrument.decimals, {
+                      timeframe: tf,
+                    }),
+                  };
+                })
+              ),
+              scoutMarketContext({
+                symbol: instrument.symbol,
+                includeDeepSearch: false,
+                batchMode: true,
+                watchlistQuotes: sharedWatchlistQuotes,
+              }),
+            ]);
 
             const m5Entry =
               timeframesData.find((t) => t.timeframe === '5M') ?? timeframesData[0];
@@ -602,6 +680,7 @@ export async function scanMarketSniperSetups(): Promise<MarketScanResponse> {
               symbol: instrument.symbol,
               activeTimeframe: '5M',
               timeframesData,
+              scoutContext,
             });
 
             if (sniperSig.plan.signal !== 'WAIT') {

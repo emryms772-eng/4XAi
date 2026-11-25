@@ -3,11 +3,15 @@ import type {
   AIBacktestReview,
   AIPriceActionSignal,
   BacktestResult,
+  MarketDriverAssessment,
+  MarketDriverVerdict,
+  MarketScoutContext,
   OHLCVCandle,
   PriceActionAnalysisSummary,
   Timeframe,
   TimeframeAlignmentItem,
 } from '../types/market.ts';
+import { evaluateAllFiveDrivers } from './marketContext.ts';
 import {
   extractHistoricalPriceActionTimeline,
   getClosedCandlesForTimeframe,
@@ -25,6 +29,10 @@ export interface RawSignalJSON {
   priceActionNarrative: string;
   keyZonesExplanation: string;
   timeframeAlignment: TimeframeAlignmentItem[];
+  marketDrivers?: MarketDriverAssessment[];
+  confirmingFactors?: string[];
+  conflictingFactors?: string[];
+  requiredChecks?: string[];
   plan: AIPriceActionSignal['plan'];
 }
 
@@ -72,6 +80,16 @@ export const SIGNAL_JSON_SCHEMA_HINT = `Return ONLY valid JSON matching this exa
   "timeframeAlignment": [
     { "timeframe": "4H"|"1H"|"15M"|"5M"|"1M", "bias": "Bullish"|"Bearish"|"Neutral", "structureEvent": "string", "rangeZone": "Discount"|"Equilibrium"|"Premium", "note": "string" }
   ],
+  "marketDrivers": [
+    { "id": 1, "driver": "1. Supply, Demand, Liquidity & Session Flow", "verdict": "Bullish"|"Bearish"|"Neutral"|"Conflicting"|"Missing Data", "summary": "string", "evidence": ["string"] },
+    { "id": 2, "driver": "2. Macroeconomic Catalysts & Central Bank Policy", "verdict": "Bullish"|"Bearish"|"Neutral"|"Conflicting"|"Missing Data", "summary": "string", "evidence": ["string"] },
+    { "id": 3, "driver": "3. Asset / Instrument Fundamentals", "verdict": "Bullish"|"Bearish"|"Neutral"|"Conflicting"|"Missing Data", "summary": "string", "evidence": ["string"] },
+    { "id": 4, "driver": "4. Market Sentiment & Risk Environment", "verdict": "Bullish"|"Bearish"|"Neutral"|"Conflicting"|"Missing Data", "summary": "string", "evidence": ["string"] },
+    { "id": 5, "driver": "5. Technical Structure & Market Mechanics", "verdict": "Bullish"|"Bearish"|"Neutral"|"Conflicting"|"Missing Data", "summary": "string", "evidence": ["string"] }
+  ],
+  "confirmingFactors": ["string"],
+  "conflictingFactors": ["string"],
+  "requiredChecks": ["string"],
   "plan": {
     "signal": "BUY" | "SELL" | "WAIT",
     "signalStrength": "A+ Setup" | "Standard" | "Developing",
@@ -101,8 +119,9 @@ export function buildMtfSignalPrompt(params: {
   symbol: string;
   activeTimeframe: Timeframe;
   timeframesData: TimeframePriceActionInput[];
+  scoutContext?: MarketScoutContext | null;
 }) {
-  const { symbol, activeTimeframe, timeframesData } = params;
+  const { symbol, activeTimeframe, timeframesData, scoutContext } = params;
   const instrument = getInstrumentBySymbol(symbol);
 
   const m5Entry =
@@ -200,25 +219,55 @@ export function buildMtfSignalPrompt(params: {
     executionTimeframe: '5M',
     nonRepaintingClosedBarsOnly: true,
     lastClosedPrice: currentPrice,
+    fiveDriverScoutContext: scoutContext
+      ? {
+          utcTimestamp: scoutContext.utcTimestamp,
+          sessionName: scoutContext.sessionName,
+          sessionLiquidityNote: scoutContext.sessionLiquidityNote,
+          sessionBlocked: scoutContext.sessionBlocked,
+          crossMarketRiskTone: scoutContext.crossMarketRiskTone,
+          crossMarketSummary: scoutContext.crossMarketSummary,
+          calendarAvailable: scoutContext.calendarAvailable,
+          imminentHighImpactEvent: scoutContext.imminentHighImpactEvent,
+          relevantEvents: scoutContext.relevantEvents,
+          fngIndex: scoutContext.fngIndex ?? null,
+          hasVerifiedExternalNews: scoutContext.hasVerifiedExternalNews,
+          macroNewsBrief: scoutContext.macroNewsBrief,
+          fundamentalsBrief: scoutContext.fundamentalsBrief,
+          sentimentBrief: scoutContext.sentimentBrief,
+          newsHeadlines: scoutContext.newsHeadlines.map((h) => ({
+            title: h.title,
+            source: h.source,
+            publishedAt: h.publishedAt,
+          })),
+          highImpactRiskDetected: scoutContext.highImpactRiskDetected,
+          highImpactRiskNote: scoutContext.highImpactRiskNote,
+        }
+      : null,
     multiTimeframePriceAction: multiTimeframeContext,
   });
 
   const systemInstruction = [
-    'You are an institutional top-down multi-timeframe pure price-action analyst operating strictly on CLOSED, NON-REPAINTING candles. SNIPER ENTRIES ONLY — ZERO SECOND-GUESSING.',
-    'All data provided uses closed bars only (no unclosed forming candles). Never guess or extrapolate unclosed candle movement.',
-    'THOROUGH MARKET READ: Carefully synthesize ALL price-action evidence across ALL 5 timeframes (4H, 1H, 15M, 5M, 1M): chronological swing progression (HH/HL/LH/LL), BOS/CHoCH structural shifts, earlier-vs-recent session shifts, unswept Equal Highs/Lows (EQH/EQL liquidity magnets), liquidity sweeps, high-volume displacement bursts, unmitigated Order Blocks & Fair Value Gaps, S/R clusters, buyer/seller pressure, and candlestick rejection/engulfing triggers.',
-    'EXECUTION RULE: Execution is ALWAYS strictly on the 5M timeframe. Set signalTimeframe to "5M". All entryPrice, entryZone, stopLoss, takeProfit1, and takeProfit2 levels MUST be calibrated for 5M execution.',
-    'MANDATORY SNIPER QUALITY GATES: NEVER issue Standard/mediocre trades. Output BUY or SELL ONLY as an "A+ Setup" when ALL FOUR Sniper Gates pass on closed bars: (1) Zero conflict across 4H & 1H (and 15M must not oppose); (2) 5M price sits in OTE Deep Discount (<= 40%) for BUY or OTE Deep Premium (>= 60%) for SELL mitigating a 5M Order Block or Fair Value Gap; (3) Confirmed closed-bar liquidity sweep + strong 5M displacement expansion + >=3 confluences; (4) Minimum Risk-to-Reward >= 1:2.5.',
-    'WHEN TO WAIT: If ANY of the 4 Sniper Gates fails, you MUST output signal "WAIT" with zero hesitation. Clearly state why to stay flat, what exact 5M closed-bar sniper trigger confirms entry, and populate conditional watch levels (entryPrice at the key 5M sniper OTE zone, stopLoss behind structure, takeProfit1/takeProfit2 at EQH/EQL liquidity targets).',
+    'You are a disciplined institutional market analyst operating strictly on CLOSED, NON-REPAINTING candles. NO GUESSING, NO FABRICATION.',
+    'FIVE-DRIVER EVALUATION MANDATE: Before issuing any trading signal, scout and evaluate ALL FIVE market drivers from the supplied payload:',
+    '(1) Supply, demand, liquidity, and session/order-flow context (UTC session liquidity, dealing-range Premium/Discount, OBs, FVGs, EQH/EQL, closed-bar buyer/seller pressure);',
+    '(2) Macroeconomic catalysts and central bank policy (interest rates, inflation, growth, scheduled economic calendar events);',
+    '(3) Asset or company/instrument fundamentals (central bank/yield/ETF/supply shifts or major announcements; note truthfully that Synthetic indices have no macro/earnings);',
+    '(4) Market sentiment and risk environment (risk-on vs risk-off cross-market tape, geopolitical or breaking news shocks);',
+    '(5) Technical structure and market mechanics (key S/R, BOS/CHoCH breakouts, sweeps, liquidity targets across 4H, 1H, 15M, 5M, 1M).',
+    'RULES FOR CERTAINTY: Do NOT guess, invent prices/timeframes, or fill in missing chart/news/macro data. If fiveDriverScoutContext marks calendarAvailable=false or hasVerifiedExternalNews=false for a non-Synthetic asset, mark those driver verdicts as "Missing Data".',
+    'Always populate confirmingFactors (what aligns with the setup), conflictingFactors (what opposes or creates risk), and requiredChecks (exact checks or chart/macro details needed first whenever issuing NO SIGNAL / WAIT).',
+    'WHEN TO OUTPUT NO SIGNAL ("WAIT"): Issue plan.signal = "WAIT" (NO SIGNAL) whenever ANY of the following occurs: (a) required macro/news/chart data is missing or contradictory; (b) sessionBlocked=true (weekend/rollover thin liquidity); (c) imminentHighImpactEvent or highImpactRiskDetected=true; (d) 4H/1H/15M HTF structure conflicts; (e) 5M lacks closed-bar OTE Discount (<=40% BUY) or Premium (>=60% SELL) + sweep/displacement confirmation; or (f) R:R < 1:2.5.',
+    'EXECUTION RULE: Execution is ALWAYS strictly on the 5M timeframe (signalTimeframe = "5M") on CLOSED bars only. Only output BUY or SELL as an "A+ Setup" when multiple drivers align and key risks are accounted for.',
     'CRITICAL RULE: Do NOT use, mention, or rely on lagging indicators such as RSI, MACD, EMA, SMA, Stochastics, or Bollinger Bands.',
-    'Provide a concise timeframeAlignment array covering all 5 timeframes (4H, 1H, 15M, 5M, 1M).',
+    'Provide marketDrivers (exactly 5 entries for drivers 1..5) and timeframeAlignment covering all 5 timeframes (4H, 1H, 15M, 5M, 1M).',
     `All price levels must be realistic relative to lastClosedPrice (${currentPrice}) and rounded to ${instrument.decimals} decimal places.`,
     'For a BUY (or bullish WAIT watch plan): stopLoss < entryPrice < takeProfit1 < takeProfit2.',
     'For a SELL (or bearish WAIT watch plan): takeProfit2 < takeProfit1 < entryPrice < stopLoss.',
     'Never promise guaranteed profits.',
   ].join(' ');
 
-  const userPrompt = `Analyze the full past-to-present historical progression AND recent OHLCV across all 5 timeframes (4H, 1H, 15M, 5M, 1M), and output a 5M execution signal (BUY, SELL, or WAIT):\n${payloadJson}`;
+  const userPrompt = `Evaluate all 5 market drivers (session/liquidity, macro/central bank, fundamentals, risk sentiment, and closed-bar 4H–1M technical structure) strictly without guessing missing data, state confirming vs conflicting factors, and output a 5M decision (BUY, SELL, or WAIT / NO SIGNAL):\n${payloadJson}`;
 
   return {
     instrument,
@@ -230,6 +279,15 @@ export function buildMtfSignalPrompt(params: {
   };
 }
 
+function normalizeDriverVerdict(raw: unknown): MarketDriverVerdict {
+  const s = String(raw ?? '').trim().toLowerCase();
+  if (s === 'bullish') return 'Bullish';
+  if (s === 'bearish') return 'Bearish';
+  if (s === 'conflicting' || s === 'conflict') return 'Conflicting';
+  if (s.includes('missing')) return 'Missing Data';
+  return 'Neutral';
+}
+
 export function normalizeSignalResult(params: {
   parsed: RawSignalJSON;
   symbol: string;
@@ -237,6 +295,8 @@ export function normalizeSignalResult(params: {
   currentPrice: number;
   confirmedBarTime?: number;
   model: string;
+  timeframesData?: TimeframePriceActionInput[];
+  scoutContext?: MarketScoutContext | null;
 }): AIPriceActionSignal {
   const {
     parsed,
@@ -245,12 +305,14 @@ export function normalizeSignalResult(params: {
     currentPrice,
     confirmedBarTime = 0,
     model,
+    timeframesData = [],
+    scoutContext = null,
   } = params;
   const instrument = getInstrumentBySymbol(symbol);
   const rawPlan = (parsed.plan ?? {}) as Partial<AIPriceActionSignal['plan']>;
 
   const rawAction = String(rawPlan.signal ?? 'WAIT').toUpperCase();
-  const signalAction: 'BUY' | 'SELL' | 'WAIT' =
+  let signalAction: 'BUY' | 'SELL' | 'WAIT' =
     rawAction === 'BUY' || rawAction === 'SELL' ? rawAction : 'WAIT';
 
   const rawBias = String(parsed.bias ?? 'Neutral');
@@ -258,7 +320,7 @@ export function normalizeSignalResult(params: {
     rawBias === 'Bullish' || rawBias === 'Bearish' ? rawBias : 'Neutral';
 
   const rawStrength = String(rawPlan.signalStrength ?? 'Developing');
-  const signalStrength: AIPriceActionSignal['plan']['signalStrength'] =
+  let signalStrength: AIPriceActionSignal['plan']['signalStrength'] =
     rawStrength === 'A+ Setup' || rawStrength === 'Standard'
       ? rawStrength
       : 'Developing';
@@ -267,6 +329,105 @@ export function normalizeSignalResult(params: {
     const n = Number(val);
     return Number.isFinite(n) ? n : fallback;
   };
+
+  const normalizedAlignment: TimeframeAlignmentItem[] = (
+    Array.isArray(parsed.timeframeAlignment) ? parsed.timeframeAlignment : []
+  ).map((item) => ({
+    ...item,
+    timeframe: normalizeTimeframe(item.timeframe, activeTimeframe),
+  }));
+
+  const m5Entry =
+    timeframesData.find((t) => t.timeframe === '5M') ?? timeframesData[0];
+  const rrString = rawPlan.riskRewardRatio || '1 : 2.0';
+
+  const fallbackDrivers = m5Entry
+    ? evaluateAllFiveDrivers({
+        symbol: instrument.symbol,
+        proposedAction: signalAction,
+        bias,
+        m5Analysis: m5Entry.analysis,
+        timeframeAlignment: normalizedAlignment,
+        riskRewardRatio: rrString,
+        scout: scoutContext,
+      })
+    : null;
+
+  const rawDrivers = Array.isArray(parsed.marketDrivers)
+    ? parsed.marketDrivers
+    : [];
+  const defaultDriverTitles: Record<1 | 2 | 3 | 4 | 5, string> = {
+    1: '1. Supply, Demand, Liquidity & Session Flow',
+    2: '2. Macroeconomic Catalysts & Central Bank Policy',
+    3: '3. Asset / Instrument Fundamentals',
+    4: '4. Market Sentiment & Risk Environment',
+    5: '5. Technical Structure & Market Mechanics',
+  };
+
+  const marketDrivers: MarketDriverAssessment[] = ([1, 2, 3, 4, 5] as const).map(
+    (id) => {
+      const fromModel = rawDrivers.find((d) => Number(d?.id) === id);
+      const fromEval = fallbackDrivers?.marketDrivers.find((d) => d.id === id);
+      if (fromModel && fromModel.summary) {
+        return {
+          id,
+          driver: fromModel.driver || defaultDriverTitles[id],
+          verdict:
+            fromEval?.verdict === 'Missing Data' || fromEval?.verdict === 'Conflicting'
+              ? fromEval.verdict
+              : normalizeDriverVerdict(fromModel.verdict),
+          summary: fromModel.summary,
+          evidence:
+            Array.isArray(fromModel.evidence) && fromModel.evidence.length > 0
+              ? fromModel.evidence.slice(0, 4)
+              : fromEval?.evidence ?? [],
+        };
+      }
+      return (
+        fromEval ?? {
+          id,
+          driver: defaultDriverTitles[id],
+          verdict: 'Missing Data',
+          summary: 'Insufficient verified data for this driver.',
+          evidence: [],
+        }
+      );
+    }
+  );
+
+  // Enforce deterministic certainty block if macro/news data missing or high-impact conflict detected
+  let setupType = rawPlan.setupType || 'MTF Structure & Liquidity Setup';
+  let triggerPattern = rawPlan.triggerPattern || '5M Price Action Confirmation';
+  if (fallbackDrivers?.shouldBlockSignal && signalAction !== 'WAIT') {
+    signalAction = 'WAIT';
+    signalStrength = 'Developing';
+    setupType = fallbackDrivers.blockReason ?? 'NO SIGNAL — Unmet Multi-Driver Certainty';
+    triggerPattern =
+      fallbackDrivers.requiredChecks[0] ?? 'Resolve conflicting or missing checks first';
+  }
+
+  const mergeList = (a?: unknown, b?: string[]) => {
+    const first = Array.isArray(a)
+      ? a.filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+      : [];
+    return Array.from(new Set([...first, ...(b ?? [])])).slice(0, 6);
+  };
+
+  const confirmingFactors = mergeList(
+    parsed.confirmingFactors,
+    fallbackDrivers?.confirmingFactors
+  );
+  const conflictingFactors = mergeList(
+    parsed.conflictingFactors,
+    fallbackDrivers?.conflictingFactors
+  );
+  const requiredChecks = mergeList(
+    parsed.requiredChecks,
+    fallbackDrivers?.requiredChecks
+  );
+
+  const analystVerdict: AIPriceActionSignal['analystVerdict'] =
+    signalAction === 'BUY' ? 'BUY' : signalAction === 'SELL' ? 'SELL' : 'NO SIGNAL';
 
   return {
     id: `sig-${instrument.symbol.replace('/', '')}-${confirmedBarTime || Date.now()}`,
@@ -280,28 +441,28 @@ export function normalizeSignalResult(params: {
     model,
     spotPriceAtSignal: currentPrice,
     bias,
+    analystVerdict,
     priceActionNarrative:
       parsed.priceActionNarrative || 'Multi-timeframe price-action scan completed.',
     keyZonesExplanation:
       parsed.keyZonesExplanation || 'See active 5M Order Blocks, FVGs, and S/R zones.',
-    timeframeAlignment: (Array.isArray(parsed.timeframeAlignment)
-      ? parsed.timeframeAlignment
-      : []
-    ).map((item) => ({
-      ...item,
-      timeframe: normalizeTimeframe(item.timeframe, activeTimeframe),
-    })),
+    timeframeAlignment: normalizedAlignment,
+    marketDrivers,
+    confirmingFactors,
+    conflictingFactors,
+    requiredChecks,
+    scoutedSources: scoutContext?.sources?.slice(0, 6),
     plan: {
       signal: signalAction,
       signalStrength,
-      setupType: rawPlan.setupType || 'MTF Structure & Liquidity Setup',
-      triggerPattern: rawPlan.triggerPattern || '5M Price Action Confirmation',
+      setupType,
+      triggerPattern,
       entryPrice: toFinite(rawPlan.entryPrice, signalAction === 'WAIT' ? 0 : currentPrice),
       entryZone: rawPlan.entryZone || currentPrice.toFixed(instrument.decimals),
       stopLoss: toFinite(rawPlan.stopLoss, 0),
       takeProfit1: toFinite(rawPlan.takeProfit1, 0),
       takeProfit2: toFinite(rawPlan.takeProfit2, 0),
-      riskRewardRatio: rawPlan.riskRewardRatio || '1 : 2.0',
+      riskRewardRatio: rrString,
       invalidationReason:
         rawPlan.invalidationReason || '5M candle close beyond structural invalidation.',
       confluences: Array.isArray(rawPlan.confluences)
@@ -398,18 +559,21 @@ export function formatSmsSignalText(signal: AIPriceActionSignal): string {
           minute: '2-digit',
         });
 
+  const verdictLabel =
+    plan.signal === 'WAIT' ? 'NO SIGNAL' : `${plan.signal} (${plan.signalStrength})`;
   const actionLine =
     plan.signal === 'WAIT'
-      ? 'Action: WAIT FOR 5M CANDLE CLOSE CONFIRMATION'
+      ? `Action: NO SIGNAL — ${signal.requiredChecks?.[0] || 'WAIT FOR 5M CANDLE CLOSE CONFIRMATION'}`
       : `Action: ENTER NOW (${plan.signal} Confirmed on Closed 5M Bar)`;
 
   const lines = [
     `StrataDesk 5M | ${signal.symbol}`,
-    `${plan.signal} (${plan.signalStrength}) | ${plan.setupType}`,
+    `${verdictLabel} | ${plan.setupType}`,
     actionLine,
     `Entry: ${fmt(plan.entryPrice)} | SL: ${fmt(plan.stopLoss)}`,
     `TP1: ${fmt(plan.takeProfit1)} | TP2: ${fmt(plan.takeProfit2)} (${plan.riskRewardRatio})`,
     `Trigger: ${plan.triggerPattern}`,
+    ...(signal.conflictingFactors?.[0] ? [`Risk/Conflict: ${signal.conflictingFactors[0]}`] : []),
     `Invalidation: ${plan.invalidationReason}`,
     `Locked Closed Bar: ${barTime} (Non-Repainting)`,
   ];

@@ -1,5 +1,6 @@
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
   Bell,
@@ -9,6 +10,7 @@ import {
   ChevronUp,
   Clock,
   Copy,
+  ExternalLink,
   Lock,
   RefreshCw,
   Send,
@@ -277,7 +279,9 @@ export function AIAnalysisCard({
                 )}
                 <div>
                   <div className={`text-base font-bold tracking-tight ${signalColor}`}>
-                    {signalAction} on {recommendedTf} · {signal.plan.signalStrength}
+                    {signalAction === 'WAIT'
+                      ? `NO SIGNAL (${recommendedTf}) · ${signal.plan.signalStrength}`
+                      : `${signalAction} on ${recommendedTf} · ${signal.plan.signalStrength}`}
                   </div>
                   <div className="text-xs text-slate-300">
                     {signal.plan.setupType}
@@ -483,16 +487,87 @@ export function AIAnalysisCard({
               </div>
             </div>
 
-            {/* Concise Top-Down Summary */}
-            <div className="space-y-2 text-xs leading-relaxed">
+            {/* Concise Top-Down Summary + Confirms vs Conflicts + Required Checks */}
+            <div className="space-y-3 text-xs leading-relaxed">
               <p className="text-slate-300">{signal.priceActionNarrative}</p>
+
+              {(signal.confirmingFactors?.length > 0 ||
+                signal.conflictingFactors?.length > 0) && (
+                <div className="rounded-md border border-slate-800/90 bg-[#0B0F17] p-3 space-y-2.5">
+                  {signal.confirmingFactors?.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-400">
+                        What Confirms
+                      </div>
+                      <ul className="space-y-1">
+                        {signal.confirmingFactors.slice(0, 3).map((item, idx) => (
+                          <li
+                            key={idx}
+                            className="flex items-start gap-1.5 text-[11px] text-slate-300"
+                          >
+                            <CheckCircle2
+                              className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400"
+                              aria-hidden="true"
+                            />
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {signal.conflictingFactors?.length > 0 && (
+                    <div
+                      className={`space-y-1 ${
+                        signal.confirmingFactors?.length > 0
+                          ? 'border-t border-slate-800/70 pt-2'
+                          : ''
+                      }`}
+                    >
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-300">
+                        What Conflicts / Risks
+                      </div>
+                      <ul className="space-y-1">
+                        {signal.conflictingFactors.slice(0, 3).map((item, idx) => (
+                          <li
+                            key={idx}
+                            className="flex items-start gap-1.5 text-[11px] text-slate-300"
+                          >
+                            <AlertTriangle
+                              className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300"
+                              aria-hidden="true"
+                            />
+                            <span>{item}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {signalAction === 'WAIT' && signal.requiredChecks?.length > 0 && (
+                <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-300">
+                    Checks Needed Before Signal
+                  </div>
+                  <ul className="space-y-1">
+                    {signal.requiredChecks.slice(0, 4).map((check, idx) => (
+                      <li key={idx} className="text-[11px] text-slate-200">
+                        · {check}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               <p className="text-slate-400">
                 <span className="font-semibold text-slate-200">Invalidation: </span>
                 {signal.plan.invalidationReason}
               </p>
             </div>
 
-            {/* Collapsible Detailed MTF Breakdown */}
+            {/* Collapsible Detailed 5-Driver & MTF Breakdown */}
             <div className="border-t border-slate-800/80 pt-2">
               <button
                 type="button"
@@ -501,8 +576,8 @@ export function AIAnalysisCard({
               >
                 <span>
                   {showBreakdown
-                    ? 'Hide MTF Breakdown & Zones'
-                    : 'Show MTF Breakdown & Zones'}
+                    ? 'Hide 5-Driver & MTF Breakdown'
+                    : 'Show 5-Driver & MTF Breakdown'}
                 </span>
                 {showBreakdown ? (
                   <ChevronUp className="h-4 w-4 text-slate-400" aria-hidden="true" />
@@ -513,6 +588,48 @@ export function AIAnalysisCard({
 
               {showBreakdown && (
                 <div className="mt-3 space-y-4">
+                  {signal.marketDrivers && signal.marketDrivers.length > 0 && (
+                    <div className="space-y-1.5">
+                      <h3 className="text-xs font-semibold text-slate-200">
+                        5 Market Drivers Evaluation
+                      </h3>
+                      <div className="divide-y divide-slate-800/70 rounded-md border border-slate-800/90 bg-[#0B0F17]">
+                        {signal.marketDrivers.map((drv) => {
+                          const drvColor =
+                            drv.verdict === 'Bullish'
+                              ? 'text-emerald-400'
+                              : drv.verdict === 'Bearish'
+                              ? 'text-rose-400'
+                              : drv.verdict === 'Conflicting' ||
+                                drv.verdict === 'Missing Data'
+                              ? 'text-amber-300'
+                              : 'text-slate-300';
+
+                          return (
+                            <div key={drv.id} className="px-3 py-2.5 text-[11px] space-y-1">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-slate-100">
+                                  {drv.driver}
+                                </span>
+                                <span className={`font-semibold shrink-0 ${drvColor}`}>
+                                  {drv.verdict}
+                                </span>
+                              </div>
+                              <p className="text-slate-300 leading-relaxed">
+                                {drv.summary}
+                              </p>
+                              {drv.evidence && drv.evidence.length > 0 && (
+                                <p className="text-slate-400 leading-relaxed">
+                                  {drv.evidence.slice(0, 2).join(' · ')}
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   {signal.timeframeAlignment && signal.timeframeAlignment.length > 0 && (
                     <div className="divide-y divide-slate-800/70 rounded-md border border-slate-800/90 bg-[#0B0F17]">
                       {signal.timeframeAlignment.map((row) => {
@@ -581,6 +698,29 @@ export function AIAnalysisCard({
                           </li>
                         ))}
                       </ul>
+                    )}
+
+                    {signal.scoutedSources && signal.scoutedSources.length > 0 && (
+                      <div className="border-t border-slate-800/70 pt-2 space-y-1">
+                        <div className="text-[11px] font-semibold text-slate-300">
+                          Scouted Sources
+                        </div>
+                        <ul className="space-y-1">
+                          {signal.scoutedSources.slice(0, 4).map((src, idx) => (
+                            <li key={idx}>
+                              <a
+                                href={src.uri}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 text-[11px] text-blue-400 hover:text-blue-300 hover:underline truncate max-w-full"
+                              >
+                                <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                <span className="truncate">{src.title}</span>
+                              </a>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
                   </div>
                 </div>

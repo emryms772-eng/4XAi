@@ -254,14 +254,20 @@ export function evaluateSignalEntryTiming(params: {
     };
   }
 
+  const firstConflict = signal.conflictingFactors?.[0];
+  const firstCheck = signal.requiredChecks?.[0];
+
   return {
     decision: 'WAIT_FOR_SETUP',
-    headline: 'NO SNIPER ENTRY — STAY FLAT',
-    detail: `No A+ sniper confirmation on this closed ${execTf} bar (${price.toFixed(
-      d
-    )}). Stay completely flat until price reaches ${zone.low.toFixed(
-      d
-    )}–${zone.high.toFixed(d)} with aligned 4H/1H structure and closes a ${execTf} confirmation bar.`,
+    headline: 'NO SIGNAL — STAY FLAT',
+    detail:
+      firstConflict || firstCheck
+        ? `${firstConflict ? `${firstConflict} ` : ''}${firstCheck ? `Needed first: ${firstCheck}` : ''}`.trim()
+        : `No A+ sniper confirmation on this closed ${execTf} bar (${price.toFixed(
+            d
+          )}). Stay completely flat until price reaches ${zone.low.toFixed(
+            d
+          )}–${zone.high.toFixed(d)} with aligned 4H/1H structure and closes a ${execTf} confirmation bar.`,
     closeCondition: `Next ${execTf} bar close in ${countdown} · Auto-rescans on close`,
     candleCloseTime: progress.nextCloseSec,
     candleTimeframe: execTf,

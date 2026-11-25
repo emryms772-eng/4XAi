@@ -440,12 +440,12 @@ export function MarketSniperScanner({
               />
               <div className="min-w-0">
                 <p className="text-xs font-semibold text-slate-100">
-                  No A+ Sniper Entries on This 5M Close — Stay Flat
+                  NO SIGNAL Across This 5M Close — Stay Flat
                 </p>
                 <p className="mt-0.5 text-xs text-slate-400">
                   All {scan.totalScanned} markets were filtered strictly on closed bars
-                  (4H/1H consensus + OTE zone + ≥1:2.4 R:R). Next re-scan runs
-                  automatically on candle close in{' '}
+                  &amp; 5 market drivers (session/liquidity, macro calendar, news, sentiment,
+                  4H/1H structure + ≥1:2.4 R:R). Next re-scan runs on candle close in{' '}
                   <span className="font-mono tabular-nums text-slate-200">
                     {formatCountdown(execProgress.secondsRemaining)}
                   </span>

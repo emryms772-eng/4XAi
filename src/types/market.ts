@@ -157,6 +157,58 @@ export interface SignalEntryTiming {
   candleTimeframe: Timeframe;
 }
 
+export type MarketDriverVerdict =
+  | 'Bullish'
+  | 'Bearish'
+  | 'Neutral'
+  | 'Conflicting'
+  | 'Missing Data';
+
+export interface MarketDriverAssessment {
+  id: 1 | 2 | 3 | 4 | 5;
+  driver: string;
+  verdict: MarketDriverVerdict;
+  summary: string;
+  evidence: string[];
+}
+
+export interface GroundedSourceLink {
+  title: string;
+  uri: string;
+}
+
+export interface EconomicCalendarEvent {
+  title: string;
+  currency: string;
+  dateIso: string;
+  timestampSec: number;
+  impact: 'High' | 'Medium' | 'Low' | 'Holiday';
+  forecast?: string;
+  previous?: string;
+  actual?: string;
+}
+
+export interface MarketScoutContext {
+  utcTimestamp: string;
+  sessionName: string;
+  sessionLiquidityNote: string;
+  sessionBlocked: boolean;
+  crossMarketRiskTone: 'Risk-On' | 'Risk-Off' | 'Mixed' | 'Unavailable';
+  crossMarketSummary: string;
+  calendarAvailable: boolean;
+  relevantEvents: EconomicCalendarEvent[];
+  imminentHighImpactEvent: EconomicCalendarEvent | null;
+  fngIndex?: { value: number; classification: string } | null;
+  hasVerifiedExternalNews: boolean;
+  macroNewsBrief: string | null;
+  fundamentalsBrief: string | null;
+  sentimentBrief: string | null;
+  newsHeadlines: Array<{ title: string; publishedAt: string; source: string; uri: string }>;
+  highImpactRiskDetected: boolean;
+  highImpactRiskNote: string | null;
+  sources: GroundedSourceLink[];
+}
+
 export interface AIPriceActionSignal {
   id: string;
   symbol: string;
@@ -169,9 +221,15 @@ export interface AIPriceActionSignal {
   model: string;
   spotPriceAtSignal: number;
   bias: 'Bullish' | 'Bearish' | 'Neutral';
+  analystVerdict: 'BUY' | 'SELL' | 'NO SIGNAL';
   priceActionNarrative: string;
   keyZonesExplanation: string;
   timeframeAlignment: TimeframeAlignmentItem[];
+  marketDrivers: MarketDriverAssessment[];
+  confirmingFactors: string[];
+  conflictingFactors: string[];
+  requiredChecks: string[];
+  scoutedSources?: GroundedSourceLink[];
   plan: PriceActionSignalPlan;
 }
 
