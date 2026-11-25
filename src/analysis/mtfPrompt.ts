@@ -137,7 +137,6 @@ export function buildMtfSignalPrompt(params: {
     instrument.basePrice;
 
   const multiTimeframeContext = timeframesData.map((tfItem) => {
-    // Strictly exclude unclosed forming bar so AI signals never repaint mid-candle
     const closedCandles = getClosedCandlesForTimeframe(
       tfItem.candles,
       tfItem.timeframe
@@ -399,7 +398,6 @@ export function normalizeSignalResult(params: {
     }
   );
 
-  // Enforce deterministic certainty block if macro/news data missing or high-impact conflict detected
   let setupType = rawPlan.setupType || 'MTF Structure & Liquidity Setup';
   let triggerPattern = rawPlan.triggerPattern || '5M Price Action Confirmation';
   if (fallbackDrivers?.shouldBlockSignal && signalAction !== 'WAIT') {
