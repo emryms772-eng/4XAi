@@ -29,7 +29,25 @@ interface RawCalendarItem {
   actual?: string;
 }
 
+interface FxEmpireCalendarEvent {
+  date?: string;
+  name?: string;
+  impact?: number;
+  country?: string;
+  forecast?: string;
+  previous?: string;
+  actual?: string;
+}
+
+interface FxEmpireCalendarResponse {
+  calendar?: Array<{
+    day?: string;
+    events?: FxEmpireCalendarEvent[];
+  }>;
+}
+
 let cachedCalendar: { fetchedAt: number; events: EconomicCalendarEvent[] } | null = null;
+let calendarInflight: Promise<{ available: boolean; events: EconomicCalendarEvent[] }> | null = null;
 let cachedFng: {
   fetchedAt: number;
   data: { value: number; classification: string } | null;
@@ -63,7 +81,7 @@ async function fetchWithTimeout(url: string, timeoutMs = HTTP_TIMEOUT_MS): Promi
     return await fetch(url, {
       signal: controller.signal,
       headers: {
-        'User-Agent': 'StrataDesk/1.0 MarketAnalyst',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       },
     });
   } finally {
@@ -71,7 +89,12 @@ async function fetchWithTimeout(url: string, timeoutMs = HTTP_TIMEOUT_MS): Promi
   }
 }
 
-function normalizeImpact(raw?: string): EconomicCalendarEvent['impact'] {
+function normalizeImpact(raw?: string | number): EconomicCalendarEvent['impact'] {
+  if (typeof raw === 'number') {
+    if (raw >= 3) return 'High';
+    if (raw === 2) return 'Medium';
+    return 'Low';
+  }
   const lower = String(raw ?? '').toLowerCase();
   if (lower.includes('high')) return 'High';
   if (lower.includes('medium')) return 'Medium';
@@ -79,28 +102,73 @@ function normalizeImpact(raw?: string): EconomicCalendarEvent['impact'] {
   return 'Low';
 }
 
-async function fetchEconomicCalendar(): Promise<{
-  available: boolean;
-  events: EconomicCalendarEvent[];
-}> {
-  if (cachedCalendar && Date.now() - cachedCalendar.fetchedAt < CALENDAR_TTL_MS) {
-    return { available: true, events: cachedCalendar.events };
+function mapCountrySlugToCurrency(raw?: string): string {
+  const slug = String(raw ?? '').trim().toLowerCase();
+  if (!slug) return '';
+  if (slug.length === 3) return slug.toUpperCase();
+  if (slug === 'united-states' || slug === 'usa' || slug === 'us') return 'USD';
+  if (
+    slug === 'euro-area' ||
+    slug === 'eurozone' ||
+    slug === 'germany' ||
+    slug === 'france' ||
+    slug === 'italy' ||
+    slug === 'spain' ||
+    slug === 'netherlands'
+  ) {
+    return 'EUR';
   }
+  if (slug === 'united-kingdom' || slug === 'uk') return 'GBP';
+  if (slug === 'japan') return 'JPY';
+  if (slug === 'switzerland') return 'CHF';
+  if (slug === 'australia') return 'AUD';
+  if (slug === 'canada') return 'CAD';
+  if (slug === 'new-zealand') return 'NZD';
+  if (slug === 'china') return 'CNY';
+  return slug.slice(0, 3).toUpperCase();
+}
 
+async function fetchFxEmpireCalendar(): Promise<EconomicCalendarEvent[] | null> {
+  try {
+    const res = await fetchWithTimeout('https://www.fxempire.com/api/v1/en/economic-calendar');
+    if (!res.ok) return null;
+    const json = (await res.json()) as FxEmpireCalendarResponse;
+    if (!Array.isArray(json.calendar)) return null;
+
+    const events: EconomicCalendarEvent[] = [];
+    for (const day of json.calendar) {
+      for (const item of day.events ?? []) {
+        if (!item.name || !item.date) continue;
+        const currency = mapCountrySlugToCurrency(item.country);
+        if (!currency) continue;
+        const tsMs = Date.parse(item.date);
+        if (!Number.isFinite(tsMs)) continue;
+        events.push({
+          title: String(item.name).trim(),
+          currency,
+          dateIso: new Date(tsMs).toISOString(),
+          timestampSec: Math.floor(tsMs / 1000),
+          impact: normalizeImpact(item.impact),
+          forecast: item.forecast ? String(item.forecast).trim() : undefined,
+          previous: item.previous ? String(item.previous).trim() : undefined,
+          actual: item.actual ? String(item.actual).trim() : undefined,
+        });
+      }
+    }
+    return events;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchForexFactoryCalendar(): Promise<EconomicCalendarEvent[] | null> {
   try {
     const res = await fetchWithTimeout(
       'https://nfs.faireconomy.media/ff_calendar_thisweek.json'
     );
-    if (!res.ok) {
-      return {
-        available: Boolean(cachedCalendar),
-        events: cachedCalendar?.events ?? [],
-      };
-    }
+    if (!res.ok) return null;
     const raw = (await res.json()) as RawCalendarItem[];
-    if (!Array.isArray(raw)) {
-      return { available: false, events: [] };
-    }
+    if (!Array.isArray(raw)) return null;
 
     const events: EconomicCalendarEvent[] = [];
     for (const item of raw) {
@@ -118,15 +186,47 @@ async function fetchEconomicCalendar(): Promise<{
         actual: item.actual ? String(item.actual).trim() : undefined,
       });
     }
-
-    cachedCalendar = { fetchedAt: Date.now(), events };
-    return { available: true, events };
+    return events;
   } catch {
-    return {
-      available: Boolean(cachedCalendar),
-      events: cachedCalendar?.events ?? [],
-    };
+    return null;
   }
+}
+
+async function fetchEconomicCalendar(): Promise<{
+  available: boolean;
+  events: EconomicCalendarEvent[];
+}> {
+  if (cachedCalendar && Date.now() - cachedCalendar.fetchedAt < CALENDAR_TTL_MS) {
+    return { available: true, events: cachedCalendar.events };
+  }
+  if (calendarInflight) {
+    return calendarInflight;
+  }
+
+  calendarInflight = (async () => {
+    try {
+      const fxEvents = await fetchFxEmpireCalendar();
+      if (fxEvents !== null) {
+        cachedCalendar = { fetchedAt: Date.now(), events: fxEvents };
+        return { available: true, events: fxEvents };
+      }
+
+      const ffEvents = await fetchForexFactoryCalendar();
+      if (ffEvents !== null) {
+        cachedCalendar = { fetchedAt: Date.now(), events: ffEvents };
+        return { available: true, events: ffEvents };
+      }
+
+      return {
+        available: Boolean(cachedCalendar),
+        events: cachedCalendar?.events ?? [],
+      };
+    } finally {
+      calendarInflight = null;
+    }
+  })();
+
+  return calendarInflight;
 }
 
 async function fetchCryptoFearGreed(): Promise<{
@@ -176,7 +276,10 @@ function getNewsQueryForSymbol(symbol: string, category: MarketCategory, batchMo
   if (batchMode) {
     if (symbol === 'XAU/USD') return 'XAUUSD OR gold price federal reserve';
     if (symbol === 'BTC/USD') return 'Bitcoin BTC price ETF macro';
-    return 'forex EURUSD USDJPY central bank interest rates';
+    if (symbol.startsWith('USD/')) return 'US Dollar DXY Federal Reserve USDJPY USDCAD';
+    if (symbol.endsWith('/JPY')) return 'EURJPY GBPJPY Bank of Japan yen';
+    if (symbol === 'EUR/GBP') return 'EURGBP ECB Bank of England';
+    return 'EURUSD GBPUSD AUDUSD forex dollar rates';
   }
 
   switch (symbol) {

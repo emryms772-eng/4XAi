@@ -233,7 +233,8 @@ function scoreHeadlineBiasForSymbol(
 ): { bullHits: number; bearHits: number; shockDetected: boolean; sampleTitles: string[] } {
   const bullWords = ['rally', 'surge', 'gains', 'rise', 'rises', 'bullish', 'cut bets', 'rate cut', 'inflow', 'inflows', 'rebound', 'climb'];
   const bearWords = ['drop', 'drops', 'fall', 'falls', 'decline', 'selloff', 'sell-off', 'slump', 'bearish', 'rate-hike', 'rate hike', 'hawkish', 'outflow', 'crash', 'low'];
-  const shockWords = ['emergency', 'halt', 'war', 'missile', 'tariff shock', 'flash crash', 'default', 'bank failure'];
+  const shockPattern =
+    /\b(emergency rate|trading halt|circuit breaker|flash crash|bank failure|sovereign default|nuclear strike|missile strike|market crash)\b/i;
 
   const base = symbol.split('/')[0];
   let bullHits = 0;
@@ -242,7 +243,7 @@ function scoreHeadlineBiasForSymbol(
 
   for (const h of headlines) {
     const lower = h.title.toLowerCase();
-    if (shockWords.some((w) => lower.includes(w))) {
+    if (shockPattern.test(lower)) {
       shockDetected = true;
     }
     const isBullText = bullWords.some((w) => lower.includes(w));
@@ -340,13 +341,13 @@ export function evaluateAllFiveDrivers(params: {
     conflictingFactors.push(`Session/liquidity restriction (${scout.sessionName}): ${scout.sessionLiquidityNote}`);
     requiredChecks.push('Wait for active liquid trading session open (London 07:00 UTC or NY overlap 12:00 UTC) and a fresh closed 5M candle.');
   } else {
-    const demandFavored =
-      snap.rangePositionPct <= 42 || snap.recentSweep === 'Sell-Side Sweep (Bullish)';
-    const supplyFavored =
-      snap.rangePositionPct >= 58 || snap.recentSweep === 'Buy-Side Sweep (Bearish)';
-    if (demandFavored && !supplyFavored) {
+    if (snap.rangePositionPct <= 42) {
       d1Verdict = 'Bullish';
-    } else if (supplyFavored && !demandFavored) {
+    } else if (snap.rangePositionPct >= 58) {
+      d1Verdict = 'Bearish';
+    } else if (snap.recentSweep === 'Sell-Side Sweep (Bullish)') {
+      d1Verdict = 'Bullish';
+    } else if (snap.recentSweep === 'Buy-Side Sweep (Bearish)') {
       d1Verdict = 'Bearish';
     } else {
       d1Verdict = 'Neutral';
@@ -496,9 +497,22 @@ export function evaluateAllFiveDrivers(params: {
       d4Evidence.push(scout.sentimentBrief);
     }
     if (scout.crossMarketRiskTone === 'Risk-On') {
-      d4Verdict = symbol === 'USD/JPY' || symbol === 'USD/CHF' || symbol === 'AUD/USD' || symbol === 'BTC/USD' ? 'Bullish' : 'Neutral';
+      d4Verdict =
+        symbol === 'USD/JPY' ||
+        symbol === 'USD/CHF' ||
+        symbol === 'AUD/USD' ||
+        symbol === 'BTC/USD'
+          ? 'Bullish'
+          : 'Neutral';
     } else if (scout.crossMarketRiskTone === 'Risk-Off') {
-      d4Verdict = symbol === 'XAU/USD' ? 'Bullish' : symbol === 'BTC/USD' || symbol === 'AUD/USD' ? 'Bearish' : 'Neutral';
+      if (symbol === 'XAU/USD') {
+        const xauMatch = scout.crossMarketSummary.match(/XAU\/USD\s+([+-]?\d+(?:\.\d+)?)%/);
+        const xauChg = xauMatch ? Number(xauMatch[1]) : 0;
+        d4Verdict = xauChg <= -0.25 ? 'Bearish' : 'Bullish';
+      } else {
+        d4Verdict =
+          symbol === 'BTC/USD' || symbol === 'AUD/USD' ? 'Bearish' : 'Neutral';
+      }
     }
     if (
       (evalSide === 'BUY' && d4Verdict === 'Bearish') ||
@@ -513,15 +527,23 @@ export function evaluateAllFiveDrivers(params: {
   // 5. Technical structure and market mechanics
   const htfBull = a4h?.bias === 'Bullish' && a1h?.bias === 'Bullish';
   const htfBear = a4h?.bias === 'Bearish' && a1h?.bias === 'Bearish';
-  const htfConflict =
-    (a4h &&
+  const htfCoreOpposing = Boolean(
+    a4h &&
       a1h &&
       ((a4h.bias === 'Bullish' && a1h.bias === 'Bearish') ||
-        (a4h.bias === 'Bearish' && a1h.bias === 'Bullish'))) ||
-    (a1h &&
-      a15m &&
-      ((a1h.bias === 'Bullish' && a15m.bias === 'Bearish') ||
-        (a1h.bias === 'Bearish' && a15m.bias === 'Bullish')));
+        (a4h.bias === 'Bearish' && a1h.bias === 'Bullish'))
+  );
+  const htfReversalConfirmed = Boolean(
+    a15m &&
+      a5m &&
+      a15m.bias !== 'Neutral' &&
+      a15m.bias === a5m.bias &&
+      ((a4h?.rangeZone === 'Discount' || a1h?.rangeZone === 'Discount') &&
+        a15m.bias === 'Bullish' ||
+        (a4h?.rangeZone === 'Premium' || a1h?.rangeZone === 'Premium') &&
+          a15m.bias === 'Bearish')
+  );
+  const htfConflict = htfCoreOpposing && !htfReversalConfirmed;
 
   const d5Verdict: MarketDriverVerdict = htfConflict
     ? 'Conflicting'
@@ -602,20 +624,22 @@ export function evaluateAllFiveDrivers(params: {
     },
   ];
 
-  // Certainty Gate: Missing data on non-synthetic, blocked session, imminent high-impact news, shock risk, or opposing macro/fundamental bias blocks BUY/SELL -> NO SIGNAL
+  // Certainty Gate: Missing data on non-synthetic, blocked session, imminent high-impact news, shock risk, or dual macro+fundamental opposition blocks BUY/SELL -> NO SIGNAL
   const hasMissingCriticalDriver =
     !isSynthetic &&
     marketDrivers.some((m) => m.verdict === 'Missing Data');
+  const dualMacroFundamentalConflict =
+    !isSynthetic &&
+    proposedAction !== 'WAIT' &&
+    ((proposedAction === 'BUY' && d2Verdict === 'Bearish' && d3Verdict === 'Bearish') ||
+      (proposedAction === 'SELL' && d2Verdict === 'Bullish' && d3Verdict === 'Bullish'));
   const hasBlockingConflict =
     scout.sessionBlocked ||
     Boolean(scout.imminentHighImpactEvent) ||
     scout.highImpactRiskDetected ||
     headlineEval.shockDetected ||
     htfConflict ||
-    (!isSynthetic &&
-      proposedAction !== 'WAIT' &&
-      ((proposedAction === 'BUY' && (d2Verdict === 'Bearish' || d3Verdict === 'Bearish')) ||
-        (proposedAction === 'SELL' && (d2Verdict === 'Bullish' || d3Verdict === 'Bullish'))));
+    dualMacroFundamentalConflict;
 
   const shouldBlockSignal = hasMissingCriticalDriver || hasBlockingConflict;
   let blockReason: string | null = null;
