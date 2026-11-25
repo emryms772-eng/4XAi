@@ -271,12 +271,41 @@ function decodeXmlEntities(text: string): string {
 }
 
 function getNewsQueryForSymbol(
-  _symbol: string,
+  symbol: string,
   category: MarketCategory,
   _batchMode: boolean
 ): string | null {
   if (category === 'Synthetic') return null;
-  return 'XAUUSD OR gold price federal reserve yields';
+
+  const upper = symbol.toUpperCase();
+  if (upper === 'XAU/USD') return 'XAUUSD OR "gold price" federal reserve yields';
+  if (upper === 'XAG/USD') return 'XAGUSD OR "silver price" federal reserve yields';
+  if (upper === 'BTC/USD') return 'Bitcoin OR BTC price crypto ETF macro';
+  if (upper === 'ETH/USD') return 'Ethereum OR ETH price crypto macro';
+  if (upper.includes('JPY')) return `${upper.replace('/', '')} OR Bank of Japan OR Federal Reserve yields`;
+  if (upper.includes('EUR')) return `${upper.replace('/', '')} OR ECB OR Eurozone inflation`;
+  if (upper.includes('GBP')) return `${upper.replace('/', '')} OR Bank of England OR UK inflation`;
+  if (upper.includes('AUD')) return `${upper.replace('/', '')} OR RBA OR Australian dollar`;
+  if (upper.includes('CAD')) return `${upper.replace('/', '')} OR Bank of Canada OR oil price`;
+
+  const clean = upper.replace('/', '');
+  return `${clean} OR "${upper}" forex central bank`;
+}
+
+const SHOCK_HEADLINE_PATTERN =
+  /\b(emergency rate|surprise rate|flash crash|war|invasion|missile strike|sanctions|bank collapse|default|fomc|nonfarm payrolls|nfp|cpi shock)\b/i;
+
+function detectHeadlineShock(
+  headlines: MarketScoutContext['newsHeadlines']
+): string | null {
+  const fourHoursAgoMs = Date.now() - 4 * 3600_000;
+  for (const h of headlines) {
+    const pubMs = Date.parse(h.publishedAt);
+    if (Number.isFinite(pubMs) && pubMs >= fourHoursAgoMs && SHOCK_HEADLINE_PATTERN.test(h.title)) {
+      return `Recent breaking headline risk: "${h.title}" (${h.source})`;
+    }
+  }
+  return null;
 }
 
 async function fetchRssHeadlines(
@@ -325,7 +354,9 @@ async function fetchRssHeadlines(
 }
 
 function getRelevantCurrencies(symbol: string): string[] {
-  if (symbol === 'XAU/USD' || symbol === 'BTC/USD') return ['USD'];
+  if (symbol === 'XAU/USD' || symbol === 'XAG/USD' || symbol === 'BTC/USD' || symbol === 'ETH/USD') {
+    return ['USD'];
+  }
   const parts = symbol.split('/');
   if (parts.length === 2 && parts[0].length === 3 && parts[1].length === 3) {
     return parts;
@@ -385,7 +416,7 @@ async function runGeminiSearchScout(params: {
     ].join('\n');
 
     const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
+      model: 'gemini-2.5-flash',
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
@@ -439,9 +470,9 @@ async function runGeminiSearchScout(params: {
 }
 
 /**
- * Scouts live session, economic calendar, cross-market sentiment, news headlines,
- * and optional Gemini Google Search grounding for all 5 Market Drivers.
- * Never fabricates missing data.
+- Scouts live session, economic calendar, cross-market sentiment, news headlines,
+- and optional Gemini Google Search grounding for all 5 Market Drivers.
+- Never fabricates missing data.
  */
 export async function scoutMarketContext(params: {
   symbol: string;
@@ -517,7 +548,6 @@ export async function scoutMarketContext(params: {
   const risk = assessCrossMarketRiskEnvironment(quotesRes, fngRes);
   const currencies = getRelevantCurrencies(instrument.symbol);
 
-  // Relevant calendar events within [-4h, +18h] sorted by nearest time
   const relevantEvents = calRes.events
     .filter(
       (e) =>
@@ -527,7 +557,6 @@ export async function scoutMarketContext(params: {
     )
     .sort((a, b) => Math.abs(a.timestampSec - nowSec) - Math.abs(b.timestampSec - nowSec));
 
-  // Unreleased High-impact macro event within [-45m, +75m] triggers blackout
   const imminentHighImpactEvent =
     relevantEvents.find(
       (e) =>
@@ -557,6 +586,13 @@ export async function scoutMarketContext(params: {
       rssHeadlines.length > 0
   );
 
+  const headlineShockNote = detectHeadlineShock(rssHeadlines);
+  const highImpactRiskDetected = Boolean(
+    searchRes?.highImpactRiskDetected || headlineShockNote
+  );
+  const highImpactRiskNote =
+    searchRes?.highImpactRiskNote ?? headlineShockNote ?? null;
+
   return {
     utcTimestamp: new Date(nowSec * 1000).toISOString(),
     sessionName: session.sessionName,
@@ -573,8 +609,8 @@ export async function scoutMarketContext(params: {
     fundamentalsBrief: searchRes?.fundamentalsBrief ?? null,
     sentimentBrief: searchRes?.sentimentBrief ?? null,
     newsHeadlines: rssHeadlines,
-    highImpactRiskDetected: Boolean(searchRes?.highImpactRiskDetected),
-    highImpactRiskNote: searchRes?.highImpactRiskNote ?? null,
+    highImpactRiskDetected,
+    highImpactRiskNote,
     sources: combinedSources.slice(0, 6),
   };
 }
