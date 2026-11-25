@@ -16,8 +16,7 @@ import { PriceActionStructureStrip } from './components/PriceActionStructureStri
 import { PriceActionZonesPanel } from './components/PriceActionZonesPanel';
 import { RiskDisclaimerBanner } from './components/RiskDisclaimerBanner';
 import { TopNavBar, type NavSectionId } from './components/TopNavBar';
-import { WatchlistSidebar } from './components/WatchlistSidebar';
-import { MARKET_INSTRUMENTS, getInstrumentBySymbol } from './config/instruments';
+import { getInstrumentBySymbol } from './config/instruments';
 import {
   closeDemoPositionManually,
   createInitialDemoState,
@@ -31,7 +30,6 @@ import {
   fetchMarketCandles,
   fetchNtfyStatus,
   fetchSmsStatus,
-  fetchWatchlistQuotes,
   requestMarketSniperScan,
   requestPriceActionBacktest,
   requestPriceActionSignal,
@@ -62,10 +60,6 @@ export default function App() {
   const [selectedSymbol, setSelectedSymbol] = useState<string>('XAU/USD');
   const [timeframe, setTimeframe] = useState<Timeframe>('5M');
   const [activeSection, setActiveSection] = useState<NavSectionId>('workspace');
-  const [isMobileMarketsOpen, setIsMobileMarketsOpen] = useState<boolean>(false);
-
-  const [watchlist, setWatchlist] = useState<WatchlistQuote[]>([]);
-  const [watchlistLoading, setWatchlistLoading] = useState<boolean>(true);
 
   const [candles, setCandles] = useState<OHLCVCandle[]>([]);
   const [candlesLoading, setCandlesLoading] = useState<boolean>(true);
@@ -118,8 +112,6 @@ export default function App() {
 
   const candlesRef = useRef<OHLCVCandle[]>([]);
   candlesRef.current = candles;
-  const watchlistRef = useRef<WatchlistQuote[]>([]);
-  watchlistRef.current = watchlist;
   const livePriceRef = useRef<number>(0);
   livePriceRef.current = livePrice;
   const isAnalyzingRef = useRef<boolean>(false);
@@ -137,7 +129,6 @@ export default function App() {
   smsStatusRef.current = smsStatus;
   const ntfyStatusRef = useRef<NtfyConfigStatus | null>(null);
   ntfyStatusRef.current = ntfyStatus;
-  const scanCursorRef = useRef<number>(0);
 
   // Persist demo account updates
   useEffect(() => {
@@ -270,40 +261,6 @@ export default function App() {
     };
   }, [candles, instrument.basePrice]);
 
-  // Initial & periodic watchlist fetch + evaluate open positions on non-selected pairs
-  useEffect(() => {
-    let active = true;
-    const loadWatchlist = async () => {
-      try {
-        const quotes = await fetchWatchlistQuotes();
-        if (!active) return;
-        setWatchlist(quotes);
-        setWatchlistLoading(false);
-
-        setDemoAccount((prev) => {
-          let updated = prev;
-          let note: string | null = null;
-          for (const q of quotes) {
-            if (q.symbol === selectedSymbol) continue;
-            const res = evaluateLiveTickOnPositions(updated, q.symbol, q.price);
-            updated = res.nextState;
-            if (res.eventMessage) note = res.eventMessage;
-          }
-          if (note) setLastExecutionNote(note);
-          return updated;
-        });
-      } catch {
-        if (active) setWatchlistLoading(false);
-      }
-    };
-    loadWatchlist();
-    const timer = setInterval(loadWatchlist, 12000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [selectedSymbol]);
-
   // Load historical candles & connect live tick stream on symbol/timeframe change
   useEffect(() => {
     let cancelled = false;
@@ -366,14 +323,6 @@ export default function App() {
               return prev;
             });
 
-            setWatchlist((prev) =>
-              prev.map((q) =>
-                q.symbol === tick.symbol
-                  ? { ...q, price: tick.price, changePct: tick.changePct }
-                  : q
-              )
-            );
-
             // Evaluate Demo Account SL, TP1+Breakeven, TP2, and live floating P&L on every tick
             setDemoAccount((prev) => {
               const res = evaluateLiveTickOnPositions(
@@ -417,11 +366,7 @@ export default function App() {
   const handleExecuteSignalOnDemo = useCallback(
     (signal: AIPriceActionSignal, spotOverride?: number) => {
       const spot =
-        spotOverride ??
-        (signal.symbol === selectedSymbol
-          ? livePriceRef.current || signal.spotPriceAtSignal
-          : watchlistRef.current.find((q) => q.symbol === signal.symbol)?.price ??
-            signal.spotPriceAtSignal);
+        spotOverride ?? (livePriceRef.current || signal.spotPriceAtSignal);
 
       const forming =
         signal.symbol === selectedSymbol && timeframeRef.current === '5M'
@@ -628,11 +573,7 @@ export default function App() {
           let nextState = prev;
           let note: string | null = null;
           for (const sniperSig of scan.sniperSignals) {
-            const spot =
-              sniperSig.symbol === currentSym
-                ? livePriceRef.current || sniperSig.spotPriceAtSignal
-                : watchlistRef.current.find((q) => q.symbol === sniperSig.symbol)
-                    ?.price ?? sniperSig.spotPriceAtSignal;
+            const spot = livePriceRef.current || sniperSig.spotPriceAtSignal;
             const forming =
               sniperSig.symbol === currentSym && timeframeRef.current === '5M'
                 ? formingCandleRef.current
@@ -940,13 +881,7 @@ export default function App() {
       if (now >= targetBoundarySec) {
         targetBoundarySec = getNextCloseTarget(now, intervalSec);
         if (!isAnalyzingRef.current) {
-          let targetSym = selectedSymbol;
-          if (demoAccount.config.scanScope === 'watchlist') {
-            const idx = scanCursorRef.current % MARKET_INSTRUMENTS.length;
-            targetSym = MARKET_INSTRUMENTS[idx].symbol;
-            scanCursorRef.current += 1;
-          }
-          void runSignalScan(targetSym, timeframe, true);
+          void runSignalScan('XAU/USD', timeframe, true);
         }
       }
       setNextScanSecondsLeft(Math.max(0, targetBoundarySec - now));
@@ -955,8 +890,6 @@ export default function App() {
     return () => clearInterval(tickTimer);
   }, [
     demoAccount.config.autoScanIntervalSec,
-    demoAccount.config.scanScope,
-    selectedSymbol,
     timeframe,
     runSignalScan,
   ]);
@@ -1059,15 +992,21 @@ export default function App() {
     [demoAccount.config.ntfyTopic, ntfyStatus]
   );
 
-  const sniperBySymbol = useMemo(() => {
-    const map: Record<string, 'BUY' | 'SELL'> = {};
-    for (const sig of marketScan?.sniperSignals ?? []) {
-      if (sig.plan.signal === 'BUY' || sig.plan.signal === 'SELL') {
-        map[sig.symbol] = sig.plan.signal;
-      }
-    }
-    return map;
-  }, [marketScan]);
+  const xauWatchlistQuote = useMemo<WatchlistQuote[]>(
+    () => [
+      {
+        symbol: instrument.symbol,
+        name: instrument.name,
+        category: instrument.category,
+        decimals: instrument.decimals,
+        price: displayPrice,
+        changePct,
+        high24h: sessionStats.high,
+        low24h: sessionStats.low,
+      },
+    ],
+    [instrument, displayPrice, changePct, sessionStats.high, sessionStats.low]
+  );
 
   return (
     <div className="min-h-screen bg-[#0B0F17] text-slate-100 flex flex-col">
@@ -1079,27 +1018,7 @@ export default function App() {
         isAnalyzing={isAnalyzing || isMarketScanning}
       />
 
-      <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col lg:flex-row">
-        <WatchlistSidebar
-          quotes={watchlist}
-          selectedSymbol={selectedSymbol}
-          sniperBySymbol={sniperBySymbol}
-          onSelectSymbol={(sym) => {
-            setSelectedSymbol(sym);
-            setAiError(null);
-            const fromScan = [
-              ...(marketScan?.sniperSignals ?? []),
-              ...(marketScan?.watchSignals ?? []),
-            ].find((s) => s.symbol === sym);
-            if (fromScan) {
-              setActiveSignal(fromScan);
-            }
-          }}
-          isLoading={watchlistLoading}
-          isMobileOpen={isMobileMarketsOpen}
-          onCloseMobile={() => setIsMobileMarketsOpen(false)}
-        />
-
+      <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col">
         <main id="workspace" className="flex-1 min-w-0 flex flex-col">
           <LivePriceHeader
             instrument={instrument}
@@ -1110,7 +1029,6 @@ export default function App() {
             sessionLow={sessionStats.low}
             isConnected={isStreamConnected}
             sourceLabel={sourceLabel}
-            onOpenMarkets={() => setIsMobileMarketsOpen(true)}
           />
 
           <div className="flex-1 space-y-5 p-3.5 sm:p-6 pb-20 md:pb-6">
@@ -1127,7 +1045,7 @@ export default function App() {
                   isScanning={isMarketScanning}
                   error={marketScanError}
                   selectedSymbol={selectedSymbol}
-                  watchlist={watchlist}
+                  watchlist={xauWatchlistQuote}
                   smsConfigured={Boolean(smsStatus?.configured)}
                   smsSending={smsSending}
                   ntfyTopic={demoAccount.config.ntfyTopic}

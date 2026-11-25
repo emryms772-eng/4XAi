@@ -44,51 +44,13 @@ const brokerQuoteCache = new Map<string, LiveBrokerQuote>();
 let lastScannerBatchAt = 0;
 let scannerInflight: Promise<void> | null = null;
 
-const OANDA_FX_TICKERS: Record<string, string> = {
-  'EUR/USD': 'OANDA:EURUSD',
-  'GBP/USD': 'OANDA:GBPUSD',
-  'USD/JPY': 'OANDA:USDJPY',
-  'USD/CHF': 'OANDA:USDCHF',
-  'AUD/USD': 'OANDA:AUDUSD',
-  'USD/CAD': 'OANDA:USDCAD',
-  'NZD/USD': 'OANDA:NZDUSD',
-  'EUR/JPY': 'OANDA:EURJPY',
-  'GBP/JPY': 'OANDA:GBPJPY',
-  'EUR/GBP': 'OANDA:EURGBP',
-};
-
 const OANDA_ALL_TICKERS: Record<string, string> = {
   'XAU/USD': 'OANDA:XAUUSD',
-  ...OANDA_FX_TICKERS,
 };
 
 const REVERSE_OANDA_MAP: Record<string, string> = Object.fromEntries(
   Object.entries(OANDA_ALL_TICKERS).map(([sym, tv]) => [tv, sym])
 );
-
-const KRAKEN_FX_PAIRS: Record<string, string> = {
-  'EUR/USD': 'EURUSD',
-  'GBP/USD': 'GBPUSD',
-  'USD/JPY': 'USDJPY',
-  'USD/CHF': 'USDCHF',
-  'AUD/USD': 'AUDUSD',
-  'USD/CAD': 'USDCAD',
-  'EUR/JPY': 'EURJPY',
-  'EUR/GBP': 'EURGBP',
-};
-
-const YAHOO_FX_TICKERS: Record<string, string> = {
-  'EUR/USD': 'EURUSD=X',
-  'GBP/USD': 'GBPUSD=X',
-  'USD/JPY': 'USDJPY=X',
-  'USD/CHF': 'USDCHF=X',
-  'AUD/USD': 'AUDUSD=X',
-  'USD/CAD': 'USDCAD=X',
-  'NZD/USD': 'NZDUSD=X',
-  'EUR/JPY': 'EURJPY=X',
-  'GBP/JPY': 'GBPJPY=X',
-  'EUR/GBP': 'EURGBP=X',
-};
 
 function roundPrice(value: number, decimals: number): number {
   const factor = Math.pow(10, decimals);
@@ -179,35 +141,7 @@ function mapTimeframeToTwelveData(tf: Timeframe): string {
   }
 }
 
-function mapTimeframeToKraken(tf: Timeframe): number {
-  switch (tf) {
-    case '1M':
-      return 1;
-    case '5M':
-      return 5;
-    case '15M':
-      return 15;
-    case '1H':
-      return 60;
-    case '4H':
-      return 240;
-  }
-}
 
-function mapTimeframeToBinance(tf: Timeframe): string {
-  switch (tf) {
-    case '1M':
-      return '1m';
-    case '5M':
-      return '5m';
-    case '15M':
-      return '15m';
-    case '1H':
-      return '1h';
-    case '4H':
-      return '4h';
-  }
-}
 
 function mapTimeframeToYahoo(tf: Timeframe): { interval: string; range: string } {
   switch (tf) {
@@ -425,98 +359,7 @@ async function fetchOandaTvCandles(
   });
 }
 
-async function fetchKrakenFxCandles(
-  krakenPair: string,
-  timeframe: Timeframe,
-  limit: number,
-  decimals: number
-): Promise<OHLCVCandle[] | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3200);
-  try {
-    const interval = mapTimeframeToKraken(timeframe);
-    const url = `https://api.kraken.com/0/public/OHLC?pair=${encodeURIComponent(
-      krakenPair
-    )}&interval=${interval}`;
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
-    });
-    if (!res.ok) return null;
-    const json = (await res.json()) as {
-      error?: string[];
-      result?: Record<string, unknown>;
-    };
-    if (json.error && json.error.length > 0) return null;
-    const entries = Object.entries(json.result ?? {}).find(
-      ([k, v]) => k !== 'last' && Array.isArray(v)
-    );
-    const rows = entries?.[1];
-    if (!Array.isArray(rows) || rows.length < 30) return null;
 
-    const tfSec = TIMEFRAME_SECONDS[timeframe];
-    const candles: OHLCVCandle[] = [];
-    for (const row of rows) {
-      if (!Array.isArray(row) || row.length < 7) continue;
-      candles.push({
-        time: getBucketTime(Number(row[0]), tfSec),
-        open: roundPrice(Number(row[1]), decimals),
-        high: roundPrice(Number(row[2]), decimals),
-        low: roundPrice(Number(row[3]), decimals),
-        close: roundPrice(Number(row[4]), decimals),
-        volume: Math.max(10, Math.round(Number(row[6]))),
-      });
-    }
-    const normalized = normalizeAscendingCandles(candles);
-    return normalized.length >= 30 ? normalized.slice(-limit) : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function fetchBinanceKlines(
-  binanceSymbol: string,
-  timeframe: Timeframe,
-  limit: number,
-  decimals: number
-): Promise<OHLCVCandle[] | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3200);
-  try {
-    const interval = mapTimeframeToBinance(timeframe);
-    const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(
-      binanceSymbol
-    )}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
-    });
-    if (!res.ok) return null;
-    const raw = (await res.json()) as unknown[];
-    if (!Array.isArray(raw) || raw.length < 30) return null;
-
-    const candles: OHLCVCandle[] = [];
-    for (const row of raw) {
-      if (!Array.isArray(row) || row.length < 6) continue;
-      candles.push({
-        time: Math.floor(Number(row[0]) / 1000),
-        open: roundPrice(Number(row[1]), decimals),
-        high: roundPrice(Number(row[2]), decimals),
-        low: roundPrice(Number(row[3]), decimals),
-        close: roundPrice(Number(row[4]), decimals),
-        volume: Math.round(Number(row[5]) * 100) / 100,
-      });
-    }
-    const normalized = normalizeAscendingCandles(candles);
-    return normalized.length >= 30 ? normalized : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
 
 async function fetchYahooChart(
   yahooSymbol: string,
@@ -591,8 +434,7 @@ async function fetchYahooChart(
 }
 
 /**
- * Batch-fetches real-time OANDA prices, 24h % change, and daily High/Low
- * across all 10 Forex pairs + Spot Gold XAU/USD in 1 fast roundtrip (~120ms).
+ * Fetches real-time OANDA Spot Gold (XAU/USD) price, 24h % change, and daily High/Low.
  */
 async function refreshOandaScannerBatch(): Promise<void> {
   const now = Date.now();
@@ -603,29 +445,16 @@ async function refreshOandaScannerBatch(): Promise<void> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2400);
     try {
-      const fxTickers = Object.values(OANDA_FX_TICKERS);
       const columns = ['close', 'change', 'open', 'high', 'low'];
-
-      const [fxRes, cfdRes] = await Promise.all([
-        fetch('https://scanner.tradingview.com/forex/scan', {
-          method: 'POST',
-          signal: controller.signal,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            symbols: { tickers: fxTickers },
-            columns,
-          }),
+      const cfdRes = await fetch('https://scanner.tradingview.com/cfd/scan', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbols: { tickers: ['OANDA:XAUUSD'] },
+          columns,
         }),
-        fetch('https://scanner.tradingview.com/cfd/scan', {
-          method: 'POST',
-          signal: controller.signal,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            symbols: { tickers: ['OANDA:XAUUSD'] },
-            columns,
-          }),
-        }),
-      ]);
+      });
 
       const ingest = (
         payload: { data?: Array<{ s?: string; d?: Array<number | null> }> } | null
@@ -659,7 +488,6 @@ async function refreshOandaScannerBatch(): Promise<void> {
         }
       };
 
-      if (fxRes.ok) ingest(await fxRes.json());
       if (cfdRes.ok) ingest(await cfdRes.json());
       lastScannerBatchAt = Date.now();
     } catch {
@@ -713,45 +541,6 @@ async function fetchSwissquoteBbo(
 async function fetchRealTimeBrokerQuote(
   symbol: string
 ): Promise<LiveBrokerQuote | null> {
-  if (symbol === 'BTC/USD') {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    try {
-      const res = await fetch(
-        'https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT',
-        { signal: controller.signal }
-      );
-      if (!res.ok) return null;
-      const data = (await res.json()) as {
-        lastPrice?: string;
-        bidPrice?: string;
-        askPrice?: string;
-        priceChangePercent?: string;
-        openPrice?: string;
-        highPrice?: string;
-        lowPrice?: string;
-      };
-      const price = Number(data.lastPrice);
-      if (!Number.isFinite(price) || price <= 0) return null;
-      return {
-        price,
-        bid: Number(data.bidPrice) || undefined,
-        ask: Number(data.askPrice) || undefined,
-        changePct: Number.isFinite(Number(data.priceChangePercent))
-          ? Number(data.priceChangePercent)
-          : undefined,
-        dailyOpen: Number(data.openPrice) || undefined,
-        high24h: Number(data.highPrice) || undefined,
-        low24h: Number(data.lowPrice) || undefined,
-        fetchedAt: Date.now(),
-      };
-    } catch {
-      return null;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
   if (OANDA_ALL_TICKERS[symbol]) {
     await refreshOandaScannerBatch();
     const cached = brokerQuoteCache.get(symbol);
@@ -848,110 +637,52 @@ async function loadUpstreamCandles(
   timeframe: Timeframe,
   limit: number
 ): Promise<{ candles: OHLCVCandle[]; source: FeedOrigin; sourceLabel: string }> {
-  if (instrument.symbol === 'BTC/USD') {
-    const binance = await fetchBinanceKlines(
-      'BTCUSDT',
+  // Tier 1: Optional Twelve Data institutional REST API (if configured)
+  const td = await fetchTwelveDataCandles(
+    instrument.symbol,
+    timeframe,
+    limit,
+    instrument.decimals
+  );
+  if (td) {
+    return {
+      candles: td,
+      source: 'live-api',
+      sourceLabel: 'Twelve Data Institutional Feed',
+    };
+  }
+
+  // Tier 2: Real-time OANDA broker OHLCV bars (matches TradingView OANDA:XAUUSD)
+  const oandaTicker = OANDA_ALL_TICKERS[instrument.symbol];
+  if (oandaTicker) {
+    const oandaBars = await fetchOandaTvCandles(
+      oandaTicker,
       timeframe,
       limit,
       instrument.decimals
     );
-    if (binance) {
+    if (oandaBars) {
       return {
-        candles: binance,
+        candles: oandaBars,
         source: 'live-api',
-        sourceLabel: 'Binance Spot Klines',
+        sourceLabel: 'OANDA Spot Gold Feed',
       };
     }
   }
 
-  if (instrument.category === 'Forex' || instrument.symbol === 'XAU/USD') {
-    // Tier 1: Optional Twelve Data institutional REST API (if configured)
-    const td = await fetchTwelveDataCandles(
-      instrument.symbol,
-      timeframe,
-      limit,
-      instrument.decimals
-    );
-    if (td) {
-      return {
-        candles: td,
-        source: 'live-api',
-        sourceLabel: 'Twelve Data Institutional Feed',
-      };
-    }
-
-    // Tier 2: Real-time OANDA broker OHLCV bars (matches TradingView OANDA charts)
-    const oandaTicker = OANDA_ALL_TICKERS[instrument.symbol];
-    if (oandaTicker) {
-      const oandaBars = await fetchOandaTvCandles(
-        oandaTicker,
-        timeframe,
-        limit,
-        instrument.decimals
-      );
-      if (oandaBars) {
-        return {
-          candles: oandaBars,
-          source: 'live-api',
-          sourceLabel:
-            instrument.symbol === 'XAU/USD'
-              ? 'OANDA Spot Gold Feed'
-              : 'OANDA Live FX Feed',
-        };
-      }
-    }
-
-    // Tier 3: Kraken Spot FX OHLCV (5-decimal precision fallback)
-    const krakenPair = KRAKEN_FX_PAIRS[instrument.symbol];
-    if (krakenPair) {
-      const krakenBars = await fetchKrakenFxCandles(
-        krakenPair,
-        timeframe,
-        limit,
-        instrument.decimals
-      );
-      if (krakenBars) {
-        return {
-          candles: krakenBars,
-          source: 'live-api',
-          sourceLabel: 'Kraken Spot FX Feed',
-        };
-      }
-    }
-
-    // Tier 4: Bucket-aligned Yahoo Finance fallback
-    if (instrument.symbol === 'XAU/USD') {
-      const yahooGold = await fetchYahooChart(
-        'GC=F',
-        timeframe,
-        limit,
-        instrument.decimals
-      );
-      if (yahooGold) {
-        return {
-          candles: yahooGold,
-          source: 'live-api',
-          sourceLabel: 'Yahoo Finance Gold Feed',
-        };
-      }
-    } else {
-      const yahooFxTicker = YAHOO_FX_TICKERS[instrument.symbol];
-      if (yahooFxTicker) {
-        const yahooFx = await fetchYahooChart(
-          yahooFxTicker,
-          timeframe,
-          limit,
-          instrument.decimals
-        );
-        if (yahooFx) {
-          return {
-            candles: yahooFx,
-            source: 'live-api',
-            sourceLabel: 'Yahoo Finance FX Feed',
-          };
-        }
-      }
-    }
+  // Tier 3: Bucket-aligned Yahoo Finance Gold Futures fallback
+  const yahooGold = await fetchYahooChart(
+    'GC=F',
+    timeframe,
+    limit,
+    instrument.decimals
+  );
+  if (yahooGold) {
+    return {
+      candles: yahooGold,
+      source: 'live-api',
+      sourceLabel: 'Yahoo Finance Gold Feed',
+    };
   }
 
   return {
@@ -1229,10 +960,7 @@ export async function getWatchlistQuotes(): Promise<WatchlistQuote[]> {
         state = seriesCache.get(cacheKey);
       }
 
-      const live =
-        instrument.symbol === 'BTC/USD'
-          ? await fetchRealTimeBrokerQuote('BTC/USD')
-          : brokerQuoteCache.get(instrument.symbol);
+      const live = brokerQuoteCache.get(instrument.symbol);
 
       const candles = state?.candles ?? [];
       const last = candles[candles.length - 1];

@@ -117,11 +117,11 @@ export function MarketSniperScanner({
           <div className="min-w-0">
             <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
               <h2 className="text-sm font-semibold text-slate-50 whitespace-nowrap">
-                AI Market Sniper Scanner
+                XAU/USD Sniper Scanner
               </h2>
               <span className="text-xs font-mono tabular-nums text-slate-400 truncate">
                 {scan
-                  ? `${scan.totalScanned} markets · ${sniperCount} sniper ${
+                  ? `XAU/USD · ${sniperCount} sniper ${
                       sniperCount === 1 ? 'entry' : 'entries'
                     } · Closed ${formatUtcTime(scan.confirmedBarTime)}`
                   : 'Candle close confirmation only · Closed 5M bar · Non-repainting'}
@@ -146,7 +146,7 @@ export function MarketSniperScanner({
               className={`h-3.5 w-3.5 ${isScanning ? 'animate-spin' : ''}`}
               aria-hidden="true"
             />
-            <span>{isScanning ? 'Scanning Markets...' : 'Scan All Markets'}</span>
+            <span>{isScanning ? 'Scanning XAU/USD...' : 'Scan XAU/USD'}</span>
           </button>
         </div>
       </div>
@@ -235,7 +235,7 @@ export function MarketSniperScanner({
           <div className="h-11 w-full rounded bg-slate-800/50 animate-pulse" />
           <div className="h-11 w-full rounded bg-slate-800/40 animate-pulse" />
           <p className="text-xs text-slate-400">
-            Scanning all 14 markets across 4H–1M closed bars for A+ sniper setups...
+            Scanning XAU/USD across 4H–1M closed bars and all 5 market drivers...
           </p>
         </div>
       )}
@@ -443,8 +443,8 @@ export function MarketSniperScanner({
                   NO SIGNAL Across This 5M Close — Stay Flat
                 </p>
                 <p className="mt-0.5 text-xs text-slate-400">
-                  All {scan.totalScanned} markets were filtered strictly on closed bars
-                  &amp; 5 market drivers (session/liquidity, macro calendar, news, sentiment,
+                  XAU/USD was evaluated strictly on closed bars &amp; 5 market drivers
+                  (session/liquidity, macro calendar, Gold/Fed news, sentiment,
                   4H/1H structure + ≥1:2.4 R:R). Next re-scan runs on candle close in{' '}
                   <span className="font-mono tabular-nums text-slate-200">
                     {formatCountdown(execProgress.secondsRemaining)}
@@ -457,7 +457,7 @@ export function MarketSniperScanner({
 
           {closestWatch.length > 0 && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-slate-800/70 pt-2.5 text-xs">
-              <span className="text-slate-400 font-medium">Closest Watch:</span>
+              <span className="text-slate-400 font-medium">XAU/USD Watch:</span>
               {closestWatch.map((w) => {
                 const inst = getInstrumentBySymbol(w.symbol);
                 return (

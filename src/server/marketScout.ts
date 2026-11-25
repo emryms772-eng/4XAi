@@ -270,46 +270,13 @@ function decodeXmlEntities(text: string): string {
     .trim();
 }
 
-function getNewsQueryForSymbol(symbol: string, category: MarketCategory, batchMode: boolean): string | null {
+function getNewsQueryForSymbol(
+  _symbol: string,
+  category: MarketCategory,
+  _batchMode: boolean
+): string | null {
   if (category === 'Synthetic') return null;
-
-  if (batchMode) {
-    if (symbol === 'XAU/USD') return 'XAUUSD OR gold price federal reserve';
-    if (symbol === 'BTC/USD') return 'Bitcoin BTC price ETF macro';
-    if (symbol.startsWith('USD/')) return 'US Dollar DXY Federal Reserve USDJPY USDCAD';
-    if (symbol.endsWith('/JPY')) return 'EURJPY GBPJPY Bank of Japan yen';
-    if (symbol === 'EUR/GBP') return 'EURGBP ECB Bank of England';
-    return 'EURUSD GBPUSD AUDUSD forex dollar rates';
-  }
-
-  switch (symbol) {
-    case 'XAU/USD':
-      return 'XAUUSD OR gold price federal reserve yields';
-    case 'BTC/USD':
-      return 'Bitcoin BTC price ETF federal reserve';
-    case 'EUR/USD':
-      return 'EURUSD ECB Federal Reserve euro dollar';
-    case 'GBP/USD':
-      return 'GBPUSD Bank of England pound dollar';
-    case 'USD/JPY':
-      return 'USDJPY Bank of Japan yen dollar';
-    case 'USD/CHF':
-      return 'USDCHF Swiss National Bank franc dollar';
-    case 'AUD/USD':
-      return 'AUDUSD Reserve Bank of Australia aussie dollar';
-    case 'USD/CAD':
-      return 'USDCAD Bank of Canada oil loonie';
-    case 'NZD/USD':
-      return 'NZDUSD Reserve Bank of New Zealand kiwi dollar';
-    case 'EUR/JPY':
-      return 'EURJPY ECB Bank of Japan euro yen';
-    case 'GBP/JPY':
-      return 'GBPJPY Bank of England Bank of Japan pound yen';
-    case 'EUR/GBP':
-      return 'EURGBP ECB Bank of England euro pound';
-    default:
-      return `${symbol.replace('/', '')} forex central bank news`;
-  }
+  return 'XAUUSD OR gold price federal reserve yields';
 }
 
 async function fetchRssHeadlines(

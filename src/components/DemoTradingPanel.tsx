@@ -17,7 +17,6 @@ import { getInstrumentBySymbol } from '../config/instruments';
 import type {
   AIPriceActionSignal,
   AutoScanIntervalSec,
-  AutoScanScope,
   AutoTradeConfig,
   DemoAccountState,
   OHLCVCandle,
@@ -279,39 +278,6 @@ export function DemoTradingPanel({
                   Close in {nextScanSecondsLeft}s
                 </span>
               )}
-          </div>
-
-          {/* Scan Scope */}
-          <div className="flex items-center gap-2">
-            <span className="text-slate-400">Target:</span>
-            <div
-              role="group"
-              aria-label="Auto-scan market scope"
-              className="flex items-center gap-1 rounded-md border border-slate-800 bg-[#0B0F17] p-0.5"
-            >
-              {(
-                [
-                  { id: 'active', label: 'Active Pair' },
-                  { id: 'watchlist', label: 'Rotate Watchlist' },
-                ] as Array<{ id: AutoScanScope; label: string }>
-              ).map((scope) => {
-                const active = demoAccount.config.scanScope === scope.id;
-                return (
-                  <button
-                    key={scope.id}
-                    type="button"
-                    onClick={() => onUpdateConfig({ scanScope: scope.id })}
-                    className={`rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                      active
-                        ? 'bg-slate-800 text-slate-100'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    {scope.label}
-                  </button>
-                );
-              })}
-            </div>
           </div>
 
           {/* Risk Per Trade */}

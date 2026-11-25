@@ -110,7 +110,7 @@ export function getUtcSessionContext(
 
 export function assessCrossMarketRiskEnvironment(
   quotes: WatchlistQuote[],
-  fng?: { value: number; classification: string } | null
+  _fng?: { value: number; classification: string } | null
 ): {
   tone: MarketScoutContext['crossMarketRiskTone'];
   summary: string;
@@ -118,64 +118,30 @@ export function assessCrossMarketRiskEnvironment(
   if (!quotes || quotes.length === 0) {
     return {
       tone: 'Unavailable',
-      summary: 'Cross-market watchlist quotes unavailable to verify risk-on vs risk-off tone.',
+      summary: 'Live XAU/USD quote unavailable to verify intraday risk sentiment.',
     };
   }
 
-  const bySym = new Map(quotes.map((q) => [q.symbol, q]));
-  const aud = bySym.get('AUD/USD');
-  const btc = bySym.get('BTC/USD');
-  const jpy = bySym.get('USD/JPY');
-  const chf = bySym.get('USD/CHF');
-  const xau = bySym.get('XAU/USD');
+  const xau = quotes.find((q) => q.symbol === 'XAU/USD') ?? quotes[0];
+  const chg = Number.isFinite(xau?.changePct) ? xau.changePct : 0;
+  const formatted = `XAU/USD ${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`;
 
-  let riskOnPoints = 0;
-  let riskOffPoints = 0;
-  const clues: string[] = [];
-
-  if (aud && Number.isFinite(aud.changePct)) {
-    if (aud.changePct >= 0.25) riskOnPoints += 1;
-    else if (aud.changePct <= -0.25) riskOffPoints += 1;
-    clues.push(`AUD/USD ${aud.changePct >= 0 ? '+' : ''}${aud.changePct.toFixed(2)}%`);
+  if (chg >= 0.45) {
+    return {
+      tone: 'Risk-Off',
+      summary: `Gold tape reads Risk-Off (safe-haven / anti-USD bid): ${formatted}.`,
+    };
   }
-  if (btc && Number.isFinite(btc.changePct)) {
-    if (btc.changePct >= 0.8) riskOnPoints += 1;
-    else if (btc.changePct <= -0.8) riskOffPoints += 1;
-    clues.push(`BTC/USD ${btc.changePct >= 0 ? '+' : ''}${btc.changePct.toFixed(2)}%`);
+  if (chg <= -0.45) {
+    return {
+      tone: 'Risk-Off',
+      summary: `Gold tape reads Risk-Off (USD-driven selloff): ${formatted}.`,
+    };
   }
-  if (jpy && Number.isFinite(jpy.changePct)) {
-    // Lower USD/JPY = Yen safe-haven bid (Risk-Off)
-    if (jpy.changePct <= -0.25) riskOffPoints += 1;
-    else if (jpy.changePct >= 0.25) riskOnPoints += 1;
-    clues.push(`USD/JPY ${jpy.changePct >= 0 ? '+' : ''}${jpy.changePct.toFixed(2)}%`);
-  }
-  if (chf && Number.isFinite(chf.changePct)) {
-    if (chf.changePct <= -0.25) riskOffPoints += 1;
-    else if (chf.changePct >= 0.25) riskOnPoints += 1;
-  }
-  if (xau && Number.isFinite(xau.changePct)) {
-    clues.push(`XAU/USD ${xau.changePct >= 0 ? '+' : ''}${xau.changePct.toFixed(2)}%`);
-  }
-
-  if (fng) {
-    if (fng.value <= 30) riskOffPoints += 1;
-    else if (fng.value >= 65) riskOnPoints += 1;
-    clues.push(`Crypto F&G ${fng.value} (${fng.classification})`);
-  }
-
-  const tone: MarketScoutContext['crossMarketRiskTone'] =
-    riskOnPoints >= riskOffPoints + 2
-      ? 'Risk-On'
-      : riskOffPoints >= riskOnPoints + 2
-      ? 'Risk-Off'
-      : 'Mixed';
 
   return {
-    tone,
-    summary:
-      clues.length > 0
-        ? `Cross-market tape reads ${tone}: ${clues.slice(0, 4).join(' · ')}.`
-        : `Cross-market tape reads ${tone}.`,
+    tone: 'Mixed',
+    summary: `Gold tape reads Mixed: ${formatted}.`,
   };
 }
 
@@ -488,37 +454,30 @@ export function evaluateAllFiveDrivers(params: {
   } else if (scout.crossMarketRiskTone === 'Unavailable' && !scout.sentimentBrief) {
     d4Verdict = isSynthetic ? 'Neutral' : 'Missing Data';
     if (!isSynthetic) {
-      conflictingFactors.push('Cross-market risk-on/risk-off telemetry unavailable.');
-      requiredChecks.push('Verify live DXY, USD/JPY, XAU/USD, and equity/crypto risk sentiment before entering.');
+      conflictingFactors.push('Live Gold/USD intraday sentiment telemetry unavailable.');
+      requiredChecks.push('Verify live XAU/USD tape, DXY/US yields, and geopolitical risk headlines before entering.');
     }
   } else {
     if (scout.sentimentBrief) {
       d4Summary = scout.sentimentBrief;
       d4Evidence.push(scout.sentimentBrief);
     }
-    if (scout.crossMarketRiskTone === 'Risk-On') {
-      d4Verdict =
-        symbol === 'USD/JPY' ||
-        symbol === 'USD/CHF' ||
-        symbol === 'AUD/USD' ||
-        symbol === 'BTC/USD'
-          ? 'Bullish'
-          : 'Neutral';
+    const xauMatch = scout.crossMarketSummary.match(/XAU\/USD\s+([+-]?\d+(?:\.\d+)?)%/);
+    const xauChg = xauMatch ? Number(xauMatch[1]) : 0;
+    if (xauChg >= 0.45) {
+      d4Verdict = 'Bullish';
+    } else if (xauChg <= -0.45) {
+      d4Verdict = 'Bearish';
     } else if (scout.crossMarketRiskTone === 'Risk-Off') {
-      if (symbol === 'XAU/USD') {
-        const xauMatch = scout.crossMarketSummary.match(/XAU\/USD\s+([+-]?\d+(?:\.\d+)?)%/);
-        const xauChg = xauMatch ? Number(xauMatch[1]) : 0;
-        d4Verdict = xauChg <= -0.25 ? 'Bearish' : 'Bullish';
-      } else {
-        d4Verdict =
-          symbol === 'BTC/USD' || symbol === 'AUD/USD' ? 'Bearish' : 'Neutral';
-      }
+      d4Verdict = xauChg <= -0.25 ? 'Bearish' : 'Bullish';
+    } else {
+      d4Verdict = 'Neutral';
     }
     if (
       (evalSide === 'BUY' && d4Verdict === 'Bearish') ||
       (evalSide === 'SELL' && d4Verdict === 'Bullish')
     ) {
-      conflictingFactors.push(`Broader risk sentiment (${scout.crossMarketRiskTone}) leans against ${evalSide} on ${symbol}.`);
+      conflictingFactors.push(`Broader Gold/risk sentiment (${scout.crossMarketRiskTone}) leans against ${evalSide} on ${symbol}.`);
     } else if (evalSide !== 'WAIT') {
       confirmingFactors.push(`Risk environment (${scout.crossMarketRiskTone}) is aligned/non-hostile.`);
     }

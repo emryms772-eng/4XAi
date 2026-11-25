@@ -1,4 +1,4 @@
-import { ArrowDownRight, ArrowUpRight, ChevronDown, Radio } from 'lucide-react';
+import { ArrowDownRight, ArrowUpRight, Radio } from 'lucide-react';
 import type {
   MarketInstrument,
   Timeframe,
@@ -13,7 +13,6 @@ interface LivePriceHeaderProps {
   sessionLow: number;
   isConnected: boolean;
   sourceLabel: string;
-  onOpenMarkets: () => void;
 }
 
 export function LivePriceHeader({
@@ -25,7 +24,6 @@ export function LivePriceHeader({
   sessionLow,
   isConnected,
   sourceLabel,
-  onOpenMarkets,
 }: LivePriceHeaderProps) {
   const isPositive = changePct >= 0;
 
@@ -37,20 +35,11 @@ export function LivePriceHeader({
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center justify-between gap-3 sm:justify-start sm:gap-5">
           <div className="flex items-center gap-2.5">
-            <button
-              type="button"
-              onClick={onOpenMarkets}
-              className="lg:hidden inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-slate-700/90 bg-[#111722] px-3 py-1.5 text-base font-bold tracking-tight text-slate-50 hover:bg-slate-800 cursor-pointer"
-            >
-              <span>{instrument.symbol}</span>
-              <ChevronDown className="h-4 w-4 text-slate-400" aria-hidden="true" />
-            </button>
-
-            <h1 className="hidden lg:block text-xl font-bold tracking-tight text-slate-50">
+            <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-50">
               {instrument.symbol}
             </h1>
 
-            <span className="hidden sm:inline text-xs text-slate-400">
+            <span className="text-xs text-slate-400">
               {instrument.name} <span aria-hidden="true">·</span> {timeframe}
             </span>
           </div>

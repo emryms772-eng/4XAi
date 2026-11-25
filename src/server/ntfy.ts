@@ -340,16 +340,16 @@ export async function sendNtfyMarketScanDigest(
   });
 
   const message = [
-    `Closed ${barUtc} bar scanned across ${scan.totalScanned} markets.`,
+    `XAU/USD closed ${barUtc} 5M bar scanned.`,
     scan.sniperSignals.length === 0
       ? '0 A+ Sniper Entries right now — Stay Flat.'
-      : `${scan.sniperSignals.length} A+ Sniper Entries active.`,
-    ...(watchLines.length > 0 ? ['', 'Closest Watch Zones:', ...watchLines] : []),
+      : `${scan.sniperSignals.length} A+ XAU/USD Sniper Entry active.`,
+    ...(watchLines.length > 0 ? ['', 'XAU/USD Watch Zone:', ...watchLines] : []),
   ].join('\n');
 
   await publishNtfyNotification({
     topic: validTopic,
-    title: `5M Scan (${barUtc}): Stay Flat · Closest Watch`,
+    title: `XAU/USD 5M Scan (${barUtc}): Stay Flat`,
     message,
     priority: 'default',
     tags: ['mag', 'hourglass_flowing_sand'],

@@ -55,12 +55,15 @@ export function loadDemoAccountState(): DemoAccountState {
           ? parsed.balance
           : base.balance,
       openPositions: Array.isArray(parsed.openPositions)
-        ? parsed.openPositions
+        ? parsed.openPositions.filter((p) => p?.symbol === 'XAU/USD')
         : [],
       closedTrades: Array.isArray(parsed.closedTrades)
         ? parsed.closedTrades
         : [],
-      config: mergedConfig,
+      config: {
+        ...mergedConfig,
+        scanScope: 'active',
+      },
     };
   } catch {
     return createInitialDemoState();

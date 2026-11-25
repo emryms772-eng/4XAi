@@ -73,7 +73,7 @@ export function TopNavBar({
             ) : (
               <Zap className="h-3.5 w-3.5" aria-hidden="true" />
             )}
-            <span>{isAnalyzing ? 'Scanning Market...' : 'Scan Market'}</span>
+            <span>{isAnalyzing ? 'Scanning XAU/USD...' : 'Scan XAU/USD'}</span>
           </button>
         </div>
       </div>
