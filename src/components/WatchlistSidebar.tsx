@@ -11,9 +11,10 @@ interface WatchlistSidebarProps {
 
 const CATEGORY_FILTERS: Array<'All' | MarketCategory> = [
   'All',
-  'Metals',
   'Forex',
+  'Metals',
   'Synthetic',
+  'Digital',
 ];
 
 export function WatchlistSidebar({
@@ -67,7 +68,7 @@ export function WatchlistSidebar({
         <div
           role="group"
           aria-label="Filter by asset class"
-          className="grid grid-cols-4 gap-1 rounded-md bg-[#0B0F17] p-1 border border-slate-800/80"
+          className="grid grid-cols-5 gap-1 rounded-md bg-[#0B0F17] p-1 border border-slate-800/80"
         >
           {CATEGORY_FILTERS.map((cat) => {
             const active = categoryFilter === cat;
@@ -76,7 +77,7 @@ export function WatchlistSidebar({
                 key={cat}
                 type="button"
                 onClick={() => setCategoryFilter(cat)}
-                className={`rounded px-1.5 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`rounded px-1 py-1 text-[10px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   active
                     ? 'bg-slate-800 text-slate-50'
                     : 'text-slate-400 hover:text-slate-200'
@@ -89,7 +90,7 @@ export function WatchlistSidebar({
         </div>
       </div>
 
-      <div className="divide-y divide-slate-800/60 max-h-[320px] lg:max-h-none overflow-y-auto">
+      <div className="divide-y divide-slate-800/60 max-h-[320px] lg:max-h-[calc(100vh-11rem)] overflow-y-auto">
         {isLoading && quotes.length === 0 ? (
           <div className="p-4 space-y-3">
             {Array.from({ length: 5 }).map((_, i) => (

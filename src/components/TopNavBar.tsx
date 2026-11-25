@@ -1,6 +1,6 @@
 import { Loader2, Zap } from 'lucide-react';
 
-export type NavSectionId = 'workspace' | 'demo' | 'levels' | 'setup' | 'risk';
+export type NavSectionId = 'workspace' | 'demo' | 'backtest' | 'levels' | 'setup';
 
 interface TopNavBarProps {
   activeSection: NavSectionId;
@@ -18,9 +18,9 @@ export function TopNavBar({
   const navItems: Array<{ id: NavSectionId; label: string }> = [
     { id: 'workspace', label: 'Price Chart' },
     { id: 'demo', label: 'Demo Desk' },
+    { id: 'backtest', label: 'Backtest' },
     { id: 'levels', label: 'Zones & Log' },
     { id: 'setup', label: 'AI Signal' },
-    { id: 'risk', label: 'Risk Notice' },
   ];
 
   return (

@@ -1,5 +1,7 @@
 import type {
+  AIBacktestReview,
   AIPriceActionSignal,
+  BacktestResult,
   MarketCandlesResponse,
   MarketTickEvent,
   OHLCVCandle,
@@ -15,6 +17,12 @@ export interface CandlesPayload extends MarketCandlesResponse {
 export interface SignalResponse {
   priceAction: PriceActionAnalysisSummary;
   signal: AIPriceActionSignal;
+}
+
+export interface BacktestResponse {
+  backtest: BacktestResult;
+  aiReview: AIBacktestReview | null;
+  aiError: string | null;
 }
 
 export interface StreamCandleHint {
@@ -167,5 +175,23 @@ export async function requestPriceActionSignal(params: {
   return parseJsonSafe<SignalResponse>(
     res,
     'Failed to generate AI price-action signal'
+  );
+}
+
+export async function requestPriceActionBacktest(params: {
+  symbol: string;
+  timeframe: Timeframe;
+  riskPercentPerTrade?: number;
+  includeAiReview?: boolean;
+  candles?: OHLCVCandle[];
+}): Promise<BacktestResponse> {
+  const res = await fetch('/api/analysis/backtest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  return parseJsonSafe<BacktestResponse>(
+    res,
+    'Failed to run causal price-action backtest'
   );
 }

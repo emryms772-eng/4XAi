@@ -265,6 +265,19 @@ function generateStructuredCandles(
   return candles;
 }
 
+const YAHOO_FX_TICKERS: Record<string, string> = {
+  'EUR/USD': 'EURUSD=X',
+  'GBP/USD': 'GBPUSD=X',
+  'USD/JPY': 'USDJPY=X',
+  'USD/CHF': 'USDCHF=X',
+  'AUD/USD': 'AUDUSD=X',
+  'USD/CAD': 'USDCAD=X',
+  'NZD/USD': 'NZDUSD=X',
+  'EUR/JPY': 'EURJPY=X',
+  'GBP/JPY': 'GBPJPY=X',
+  'EUR/GBP': 'EURGBP=X',
+};
+
 async function loadUpstreamCandles(
   instrument: MarketInstrument,
   timeframe: Timeframe,
@@ -315,32 +328,17 @@ async function loadUpstreamCandles(
     }
   }
 
-  if (instrument.symbol === 'EUR/USD') {
-    const yahooEur = await fetchYahooChart(
-      'EURUSD=X',
+  const yahooFxTicker = YAHOO_FX_TICKERS[instrument.symbol];
+  if (yahooFxTicker) {
+    const yahooFx = await fetchYahooChart(
+      yahooFxTicker,
       timeframe,
       limit,
       instrument.decimals
     );
-    if (yahooEur) {
+    if (yahooFx) {
       return {
-        candles: yahooEur,
-        source: 'live-api',
-        sourceLabel: 'Yahoo Finance FX Feed',
-      };
-    }
-  }
-
-  if (instrument.symbol === 'GBP/USD') {
-    const yahooGbp = await fetchYahooChart(
-      'GBPUSD=X',
-      timeframe,
-      limit,
-      instrument.decimals
-    );
-    if (yahooGbp) {
-      return {
-        candles: yahooGbp,
+        candles: yahooFx,
         source: 'live-api',
         sourceLabel: 'Yahoo Finance FX Feed',
       };
@@ -367,7 +365,7 @@ export async function getMarketCandles(
   const existing = seriesCache.get(cacheKey);
 
   // Reuse cached series for 45 seconds so live ticks remain continuous with history
-  if (existing && Date.now() - existing.lastUpdatedAt < 45000) {
+  if (existing && Date.now() - existing.lastUpdatedAt < 45000 && existing.candles.length >= limit) {
     return {
       symbol: instrument.symbol,
       timeframe,
@@ -546,35 +544,35 @@ export async function advanceMarketTick(
 }
 
 export async function getWatchlistQuotes(): Promise<WatchlistQuote[]> {
-  const quotes: WatchlistQuote[] = [];
-  for (const instrument of MARKET_INSTRUMENTS) {
-    const cacheKey = `${instrument.symbol}:5M`;
-    let state = seriesCache.get(cacheKey);
-    if (!state) {
-      await getMarketCandles(instrument.symbol, '5M', 120);
-      state = seriesCache.get(cacheKey);
-    }
-    const candles = state?.candles ?? [];
-    const last = candles[candles.length - 1];
-    const recent = candles.slice(-48);
-    const price = last?.close ?? instrument.basePrice;
-    const anchor = state?.anchorOpen24h ?? recent[0]?.open ?? price;
-    const changePct = ((price - anchor) / Math.max(anchor, 1e-9)) * 100;
-    const high24h =
-      recent.length > 0 ? Math.max(...recent.map((c) => c.high)) : price;
-    const low24h =
-      recent.length > 0 ? Math.min(...recent.map((c) => c.low)) : price;
+  return Promise.all(
+    MARKET_INSTRUMENTS.map(async (instrument) => {
+      const cacheKey = `${instrument.symbol}:5M`;
+      let state = seriesCache.get(cacheKey);
+      if (!state) {
+        await getMarketCandles(instrument.symbol, '5M', 120);
+        state = seriesCache.get(cacheKey);
+      }
+      const candles = state?.candles ?? [];
+      const last = candles[candles.length - 1];
+      const recent = candles.slice(-48);
+      const price = last?.close ?? instrument.basePrice;
+      const anchor = state?.anchorOpen24h ?? recent[0]?.open ?? price;
+      const changePct = ((price - anchor) / Math.max(anchor, 1e-9)) * 100;
+      const high24h =
+        recent.length > 0 ? Math.max(...recent.map((c) => c.high)) : price;
+      const low24h =
+        recent.length > 0 ? Math.min(...recent.map((c) => c.low)) : price;
 
-    quotes.push({
-      symbol: instrument.symbol,
-      name: instrument.name,
-      category: instrument.category,
-      decimals: instrument.decimals,
-      price: roundPrice(price, instrument.decimals),
-      changePct: Math.round(changePct * 100) / 100,
-      high24h: roundPrice(high24h, instrument.decimals),
-      low24h: roundPrice(low24h, instrument.decimals),
-    });
-  }
-  return quotes;
+      return {
+        symbol: instrument.symbol,
+        name: instrument.name,
+        category: instrument.category,
+        decimals: instrument.decimals,
+        price: roundPrice(price, instrument.decimals),
+        changePct: Math.round(changePct * 100) / 100,
+        high24h: roundPrice(high24h, instrument.decimals),
+        low24h: roundPrice(low24h, instrument.decimals),
+      };
+    })
+  );
 }

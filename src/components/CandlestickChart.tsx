@@ -557,6 +557,9 @@ export function CandlestickChart({
             <span className="text-sky-400">
               {priceAction.snapshot.latestStructureEvent}
             </span>
+            <span className="text-emerald-400">
+              Non-Repainting (Closed Bars)
+            </span>
           </div>
         )}
 

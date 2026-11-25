@@ -15,12 +15,18 @@ function roundToDecimals(value: number, decimals: number): number {
 
 interface SwingPivot {
   index: number;
+  confirmIndex: number; // Strictly causal: bar index when pivot is confirmed without lookahead
   time: number;
   price: number;
   kind: 'high' | 'low';
 }
 
-function detectSwingPivots(candles: OHLCVCandle[], lookback = 3): SwingPivot[] {
+const PIVOT_LOOKBACK = 3;
+
+function detectSwingPivots(
+  candles: OHLCVCandle[],
+  lookback = PIVOT_LOOKBACK
+): SwingPivot[] {
   const pivots: SwingPivot[] = [];
   for (let i = lookback; i < candles.length - lookback; i++) {
     const high = candles[i].high;
@@ -35,10 +41,22 @@ function detectSwingPivots(candles: OHLCVCandle[], lookback = 3): SwingPivot[] {
     }
 
     if (isHigh) {
-      pivots.push({ index: i, time: candles[i].time, price: high, kind: 'high' });
+      pivots.push({
+        index: i,
+        confirmIndex: i + lookback,
+        time: candles[i].time,
+        price: high,
+        kind: 'high',
+      });
     }
     if (isLow) {
-      pivots.push({ index: i, time: candles[i].time, price: low, kind: 'low' });
+      pivots.push({
+        index: i,
+        confirmIndex: i + lookback,
+        time: candles[i].time,
+        price: low,
+        kind: 'low',
+      });
     }
   }
   return pivots;
@@ -133,7 +151,7 @@ function detectFairValueGapsAndOrderBlocks(
     const next = candles[i + 1];
     const currBody = Math.abs(curr.close - curr.open);
 
-    // Bullish Fair Value Gap (3-candle displacement up)
+    // Bullish Fair Value Gap (confirmed only after candle i+1 has closed)
     if (prev.high < next.low && next.low - prev.high > avgRange * 0.15) {
       const fvgLow = roundToDecimals(prev.high, decimals);
       const fvgHigh = roundToDecimals(next.low, decimals);
@@ -156,7 +174,7 @@ function detectFairValueGapsAndOrderBlocks(
       }
     }
 
-    // Bearish Fair Value Gap (3-candle displacement down)
+    // Bearish Fair Value Gap (confirmed only after candle i+1 has closed)
     if (prev.low > next.high && prev.low - next.high > avgRange * 0.15) {
       const fvgLow = roundToDecimals(next.high, decimals);
       const fvgHigh = roundToDecimals(prev.low, decimals);
@@ -179,7 +197,7 @@ function detectFairValueGapsAndOrderBlocks(
       }
     }
 
-    // Bullish Demand Order Block: bearish candle followed by strong bullish displacement
+    // Bullish Demand Order Block (displacement candle curr is closed)
     if (
       prev.close < prev.open &&
       curr.close > curr.open &&
@@ -207,7 +225,7 @@ function detectFairValueGapsAndOrderBlocks(
       }
     }
 
-    // Bearish Supply Order Block: bullish candle followed by strong bearish displacement
+    // Bearish Supply Order Block (displacement candle curr is closed)
     if (
       prev.close > prev.open &&
       curr.close < curr.open &&
@@ -236,7 +254,6 @@ function detectFairValueGapsAndOrderBlocks(
     }
   }
 
-  // Keep closest and most recent unmitigated zones
   return zones
     .sort((a, b) => Math.abs(a.distancePct) - Math.abs(b.distancePct))
     .slice(0, 6);
@@ -267,10 +284,10 @@ function detectCandlestickPatternsAndSweeps(
     const upperWick = curr.high - Math.max(curr.open, curr.close);
     const lowerWick = Math.min(curr.open, curr.close) - curr.low;
 
-    // Liquidity Sweep check against prior confirmed swing pivots
+    // Strictly causal: only compare against pivots whose confirmation bar already closed BEFORE bar i
     const sweptHigh = swingHighs.find(
       (sh) =>
-        sh.index < i - 2 &&
+        sh.confirmIndex < i &&
         curr.high > sh.price &&
         curr.close < sh.price &&
         upperWick > body * 0.6
@@ -281,7 +298,7 @@ function detectCandlestickPatternsAndSweeps(
         time: curr.time,
         name: 'Buy-Side Liquidity Sweep',
         bias: 'Bearish',
-        description: `Wick pierced prior swing high (${sweptHigh.price}) and rejected back below.`,
+        description: `Closed bar wicked above confirmed swing high (${sweptHigh.price}) and rejected back below.`,
       });
       markers.push({
         time: curr.time,
@@ -295,7 +312,7 @@ function detectCandlestickPatternsAndSweeps(
 
     const sweptLow = swingLows.find(
       (sl) =>
-        sl.index < i - 2 &&
+        sl.confirmIndex < i &&
         curr.low < sl.price &&
         curr.close > sl.price &&
         lowerWick > body * 0.6
@@ -306,7 +323,7 @@ function detectCandlestickPatternsAndSweeps(
         time: curr.time,
         name: 'Sell-Side Liquidity Sweep',
         bias: 'Bullish',
-        description: `Wick ran stops below prior swing low (${sweptLow.price}) and reclaimed inside.`,
+        description: `Closed bar swept below confirmed swing low (${sweptLow.price}) and reclaimed inside.`,
       });
       markers.push({
         time: curr.time,
@@ -318,7 +335,7 @@ function detectCandlestickPatternsAndSweeps(
       });
     }
 
-    // Bullish Engulfing
+    // Bullish Engulfing (closed bar)
     if (
       prev.close < prev.open &&
       curr.close > curr.open &&
@@ -330,7 +347,7 @@ function detectCandlestickPatternsAndSweeps(
         time: curr.time,
         name: 'Bullish Engulfing',
         bias: 'Bullish',
-        description: 'Demand candle completely engulfed prior bearish body.',
+        description: 'Confirmed demand candle engulfed prior bearish body.',
       });
       markers.push({
         time: curr.time,
@@ -342,7 +359,7 @@ function detectCandlestickPatternsAndSweeps(
       });
     }
 
-    // Bearish Engulfing
+    // Bearish Engulfing (closed bar)
     if (
       prev.close > prev.open &&
       curr.close < curr.open &&
@@ -354,7 +371,7 @@ function detectCandlestickPatternsAndSweeps(
         time: curr.time,
         name: 'Bearish Engulfing',
         bias: 'Bearish',
-        description: 'Supply candle completely engulfed prior bullish body.',
+        description: 'Confirmed supply candle engulfed prior bullish body.',
       });
       markers.push({
         time: curr.time,
@@ -366,7 +383,7 @@ function detectCandlestickPatternsAndSweeps(
       });
     }
 
-    // Bullish Hammer / Rejection Pin Bar
+    // Bullish Rejection Pin Bar (closed bar)
     if (
       lowerWick >= Math.max(body * 2.0, range * 0.58) &&
       upperWick <= range * 0.2
@@ -375,7 +392,7 @@ function detectCandlestickPatternsAndSweeps(
         time: curr.time,
         name: 'Bullish Rejection Pin Bar',
         bias: 'Bullish',
-        description: 'Long lower rejection wick showing aggressive demand absorption.',
+        description: 'Confirmed lower rejection wick showing demand absorption.',
       });
       markers.push({
         time: curr.time,
@@ -387,7 +404,7 @@ function detectCandlestickPatternsAndSweeps(
       });
     }
 
-    // Bearish Shooting Star / Rejection Pin Bar
+    // Bearish Rejection Pin Bar (closed bar)
     if (
       upperWick >= Math.max(body * 2.0, range * 0.58) &&
       lowerWick <= range * 0.2
@@ -396,7 +413,7 @@ function detectCandlestickPatternsAndSweeps(
         time: curr.time,
         name: 'Bearish Rejection Pin Bar',
         bias: 'Bearish',
-        description: 'Long upper rejection wick showing aggressive supply absorption.',
+        description: 'Confirmed upper rejection wick showing supply absorption.',
       });
       markers.push({
         time: curr.time,
@@ -408,13 +425,13 @@ function detectCandlestickPatternsAndSweeps(
       });
     }
 
-    // Inside Bar Compression
+    // Inside Bar Compression (closed bar)
     if (curr.high < prev.high && curr.low > prev.low) {
       patterns.push({
         time: curr.time,
         name: 'Inside Bar Compression',
         bias: 'Neutral',
-        description: 'Range contraction inside prior bar; watch for directional expansion.',
+        description: 'Range contraction inside prior closed bar.',
       });
     }
   }
@@ -426,11 +443,25 @@ function detectCandlestickPatternsAndSweeps(
   };
 }
 
+export interface AnalyzePriceActionOptions {
+  /**
+   * Non-repainting guard: when true (default for live charts & signals),
+   * excludes the currently forming candle from marker/BOS/pattern detection
+   * so confirmed signals never appear and disappear mid-candle.
+   */
+  excludeFormingBar?: boolean;
+}
+
 export function analyzePriceAction(
   candles: OHLCVCandle[],
-  decimals: number
+  decimals: number,
+  options: AnalyzePriceActionOptions = {}
 ): PriceActionAnalysisSummary {
-  if (candles.length === 0) {
+  const excludeFormingBar = options.excludeFormingBar ?? true;
+  const evalCandles =
+    excludeFormingBar && candles.length > 10 ? candles.slice(0, -1) : candles;
+
+  if (evalCandles.length === 0) {
     return {
       levels: [],
       zones: [],
@@ -455,25 +486,24 @@ export function analyzePriceAction(
     };
   }
 
-  const lastClose = candles[candles.length - 1].close;
-  const avgRangeRaw = computeAverageCandleRange(candles, 20);
+  const lastSpotClose = candles[candles.length - 1].close;
+  const avgRangeRaw = computeAverageCandleRange(evalCandles, 20);
   const avgCandleRange = roundToDecimals(avgRangeRaw, decimals);
   const avgRangePct =
-    Math.round((avgRangeRaw / Math.max(lastClose, 1e-9)) * 10000) / 100;
+    Math.round((avgRangeRaw / Math.max(lastSpotClose, 1e-9)) * 10000) / 100;
 
-  const pivots = detectSwingPivots(candles, 3);
+  const pivots = detectSwingPivots(evalCandles, PIVOT_LOOKBACK);
   const swingHighs = pivots.filter((p) => p.kind === 'high');
   const swingLows = pivots.filter((p) => p.kind === 'low');
 
-  // Dealing range from recent prominent swing highs/lows
   const lookbackHigh =
     swingHighs.length > 0
       ? Math.max(...swingHighs.slice(-3).map((s) => s.price))
-      : Math.max(...candles.slice(-40).map((c) => c.high));
+      : Math.max(...evalCandles.slice(-40).map((c) => c.high));
   const lookbackLow =
     swingLows.length > 0
       ? Math.min(...swingLows.slice(-3).map((s) => s.price))
-      : Math.min(...candles.slice(-40).map((c) => c.low));
+      : Math.min(...evalCandles.slice(-40).map((c) => c.low));
 
   const dealingRangeHigh = roundToDecimals(lookbackHigh, decimals);
   const dealingRangeLow = roundToDecimals(lookbackLow, decimals);
@@ -483,14 +513,15 @@ export function analyzePriceAction(
   );
 
   const rangeSpan = Math.max(dealingRangeHigh - dealingRangeLow, 1e-9);
-  const rawPosPct = ((lastClose - dealingRangeLow) / rangeSpan) * 100;
-  const rangePositionPct = Math.round(Math.min(100, Math.max(0, rawPosPct)) * 10) / 10;
+  const rawPosPct = ((lastSpotClose - dealingRangeLow) / rangeSpan) * 100;
+  const rangePositionPct =
+    Math.round(Math.min(100, Math.max(0, rawPosPct)) * 10) / 10;
 
   let rangeZone: PriceActionSnapshot['rangeZone'] = 'Equilibrium';
   if (rangePositionPct <= 42) rangeZone = 'Discount';
   else if (rangePositionPct >= 58) rangeZone = 'Premium';
 
-  // Classify HH/HL vs LH/LL structure and detect BOS / CHoCH
+  // Causal HH/HL vs LH/LL classification and BOS/CHoCH on closed bars only
   let trendStructure: PriceActionSnapshot['trendStructure'] = 'Ranging / Choppy';
   let latestStructureEvent: PriceActionSnapshot['latestStructureEvent'] =
     'Inside Range';
@@ -508,10 +539,19 @@ export function analyzePriceAction(
       trendStructure = 'Bearish (LH / LL)';
     }
 
-    // Check latest candles breaking the most recent structural swing
-    const recentTail = candles.slice(-12);
-    const bosUpBar = recentTail.find((c) => c.close > lastHigh.price);
-    const bosDownBar = recentTail.find((c) => c.close < lastLow.price);
+    const tailStart = Math.max(0, evalCandles.length - 12);
+    let bosUpBar: OHLCVCandle | undefined;
+    let bosDownBar: OHLCVCandle | undefined;
+
+    for (let idx = tailStart; idx < evalCandles.length; idx++) {
+      const bar = evalCandles[idx];
+      if (idx > lastHigh.confirmIndex && bar.close > lastHigh.price && !bosUpBar) {
+        bosUpBar = bar;
+      }
+      if (idx > lastLow.confirmIndex && bar.close < lastLow.price && !bosDownBar) {
+        bosDownBar = bar;
+      }
+    }
 
     if (bosUpBar && (!bosDownBar || bosUpBar.time >= bosDownBar.time)) {
       const isReversal = trendStructure === 'Bearish (LH / LL)';
@@ -538,8 +578,8 @@ export function analyzePriceAction(
     }
   }
 
-  // Buyer vs Seller candle close pressure over last 12 candles
-  const pressureSlice = candles.slice(-12);
+  // Buyer vs Seller candle close pressure over last 12 closed bars
+  const pressureSlice = evalCandles.slice(-12);
   let bullBodySum = 0;
   let totalBodySum = 0;
   for (const c of pressureSlice) {
@@ -551,25 +591,24 @@ export function analyzePriceAction(
     totalBodySum > 0 ? Math.round((bullBodySum / totalBodySum) * 100) : 50;
 
   const levels = clusterSupportResistance(
-    candles,
+    evalCandles,
     pivots,
-    lastClose,
+    lastSpotClose,
     avgRangeRaw,
     decimals
   );
   const zones = detectFairValueGapsAndOrderBlocks(
-    candles,
+    evalCandles,
     avgRangeRaw,
-    lastClose,
+    lastSpotClose,
     decimals
   );
   const patternResult = detectCandlestickPatternsAndSweeps(
-    candles,
+    evalCandles,
     pivots,
     avgRangeRaw
   );
 
-  // Deduplicate markers by time so Lightweight Charts receives strictly ascending unique-ish markers
   const allMarkers = [...structureMarkers, ...patternResult.markers].sort(
     (a, b) => a.time - b.time
   );

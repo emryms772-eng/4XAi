@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { analyzePriceAction } from './analysis/priceAction';
 import { AIAnalysisCard } from './components/AIAnalysisCard';
+import { BacktestPanel } from './components/BacktestPanel';
 import { CandlestickChart } from './components/CandlestickChart';
 import { DemoTradingPanel } from './components/DemoTradingPanel';
 import { LivePriceHeader } from './components/LivePriceHeader';
@@ -22,12 +23,15 @@ import {
 import {
   fetchMarketCandles,
   fetchWatchlistQuotes,
+  requestPriceActionBacktest,
   requestPriceActionSignal,
   subscribeMarketStream,
 } from './services/marketClient';
 import type {
+  AIBacktestReview,
   AIPriceActionSignal,
   AutoTradeConfig,
+  BacktestResult,
   DemoAccountState,
   FeedOrigin,
   OHLCVCandle,
@@ -71,6 +75,15 @@ export default function App() {
   const [nextScanSecondsLeft, setNextScanSecondsLeft] = useState<number | null>(
     null
   );
+
+  const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(
+    null
+  );
+  const [aiBacktestReview, setAiBacktestReview] =
+    useState<AIBacktestReview | null>(null);
+  const [backtestAiError, setBacktestAiError] = useState<string | null>(null);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
+  const [isBacktesting, setIsBacktesting] = useState<boolean>(false);
 
   const candlesRef = useRef<OHLCVCandle[]>([]);
   candlesRef.current = candles;
@@ -155,6 +168,10 @@ export default function App() {
 
     setCandlesLoading(true);
     setFeedError(null);
+    setBacktestResult(null);
+    setAiBacktestReview(null);
+    setBacktestAiError(null);
+    setBacktestError(null);
 
     fetchMarketCandles(selectedSymbol, timeframe, 180)
       .then((payload) => {
@@ -403,6 +420,42 @@ export default function App() {
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  const handleRunBacktest = useCallback(
+    async (includeAiReview: boolean) => {
+      if (isBacktesting) return;
+      setIsBacktesting(true);
+      setBacktestError(null);
+      setBacktestAiError(null);
+
+      try {
+        const res = await requestPriceActionBacktest({
+          symbol: selectedSymbol,
+          timeframe,
+          riskPercentPerTrade: demoAccount.config.riskPercentPerTrade,
+          includeAiReview,
+          candles: candlesRef.current.length >= 260 ? candlesRef.current : undefined,
+        });
+        setBacktestResult(res.backtest);
+        setAiBacktestReview(res.aiReview);
+        setBacktestAiError(res.aiError);
+      } catch (err) {
+        setBacktestError(
+          err instanceof Error
+            ? err.message
+            : 'Unable to execute price-action backtest.'
+        );
+      } finally {
+        setIsBacktesting(false);
+      }
+    },
+    [
+      isBacktesting,
+      selectedSymbol,
+      timeframe,
+      demoAccount.config.riskPercentPerTrade,
+    ]
+  );
+
   const displayPrice = livePrice || instrument.basePrice;
   const displayBid = bid || displayPrice;
   const displayAsk = ask || displayPrice;
@@ -501,6 +554,18 @@ export default function App() {
                 setSelectedSymbol(sym);
                 setAiError(null);
               }}
+            />
+
+            <BacktestPanel
+              symbol={selectedSymbol}
+              timeframe={timeframe}
+              riskPercentPerTrade={demoAccount.config.riskPercentPerTrade}
+              backtest={backtestResult}
+              aiReview={aiBacktestReview}
+              aiError={backtestAiError}
+              backtestError={backtestError}
+              isRunning={isBacktesting}
+              onRunBacktest={handleRunBacktest}
             />
 
             <PriceActionZonesPanel

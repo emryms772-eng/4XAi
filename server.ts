@@ -3,15 +3,23 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { runNonRepaintingBacktest } from './src/analysis/backtester.ts';
 import { analyzePriceAction } from './src/analysis/priceAction.ts';
 import { TIMEFRAMES, getInstrumentBySymbol } from './src/config/instruments.ts';
-import { generatePriceActionSignal } from './src/server/aiAnalysis.ts';
+import {
+  generateBacktestReview,
+  generatePriceActionSignal,
+} from './src/server/aiAnalysis.ts';
 import {
   advanceMarketTick,
   getMarketCandles,
   getWatchlistQuotes,
 } from './src/server/marketData.ts';
-import type { OHLCVCandle, Timeframe } from './src/types/market.ts';
+import type {
+  AIBacktestReview,
+  OHLCVCandle,
+  Timeframe,
+} from './src/types/market.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -183,6 +191,60 @@ async function startServer() {
       const status =
         errStatus ?? (message.includes('GEMINI_API_KEY') ? 400 : 500);
       res.status(status).json({ error: message });
+    }
+  });
+
+  app.post('/api/analysis/backtest', async (req, res) => {
+    try {
+      const symbol =
+        typeof req.body?.symbol === 'string' ? req.body.symbol : 'XAU/USD';
+      const timeframe = parseTimeframe(req.body?.timeframe);
+      const instrument = getInstrumentBySymbol(symbol);
+      const riskRaw = Number(req.body?.riskPercentPerTrade);
+      const riskPercentPerTrade =
+        Number.isFinite(riskRaw) && riskRaw >= 0.25 && riskRaw <= 5
+          ? riskRaw
+          : 1;
+      const includeAiReview = Boolean(req.body?.includeAiReview);
+
+      const clientCandles: OHLCVCandle[] = Array.isArray(req.body?.candles)
+        ? (req.body.candles as OHLCVCandle[])
+        : [];
+
+      const candles =
+        clientCandles.length >= 260
+          ? clientCandles
+          : (await getMarketCandles(instrument.symbol, timeframe, 280)).candles;
+
+      const backtest = runNonRepaintingBacktest({
+        symbol: instrument.symbol,
+        timeframe,
+        candles,
+        initialCapital: 10000,
+        riskPercentPerTrade,
+      });
+
+      let aiReview: AIBacktestReview | null = null;
+      let aiError: string | null = null;
+
+      if (includeAiReview) {
+        try {
+          aiReview = await generateBacktestReview(backtest);
+        } catch (err) {
+          aiError =
+            err instanceof Error
+              ? err.message
+              : 'Unable to generate AI backtest audit.';
+        }
+      }
+
+      res.json({ backtest, aiReview, aiError });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unable to execute causal price-action backtest.';
+      res.status(500).json({ error: message });
     }
   });
 

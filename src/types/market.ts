@@ -216,3 +216,71 @@ export interface DemoAccountState {
   config: AutoTradeConfig;
 }
 
+export interface BacktestTrade {
+  id: string;
+  side: 'BUY' | 'SELL';
+  setupType: string;
+  trigger: string;
+  entryTime: number;
+  exitTime: number;
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  exitPrice: number;
+  exitReason: 'TP2 Hit' | 'Breakeven Stop' | 'Stop Loss' | 'End of Sample';
+  tp1Hit: boolean;
+  rMultiple: number;
+  pnlUsd: number;
+  equityAfter: number;
+}
+
+export interface BacktestSetupStats {
+  setupType: string;
+  trades: number;
+  wins: number;
+  winRatePct: number;
+  netR: number;
+  netPnlUsd: number;
+}
+
+export interface BacktestEquityPoint {
+  time: number;
+  equity: number;
+}
+
+export interface BacktestResult {
+  symbol: string;
+  timeframe: Timeframe;
+  barsTested: number;
+  fromTime: number;
+  toTime: number;
+  initialCapital: number;
+  finalEquity: number;
+  netReturnUsd: number;
+  netReturnPct: number;
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  breakevens: number;
+  winRatePct: number;
+  profitFactor: number;
+  expectancyR: number;
+  maxDrawdownPct: number;
+  nonRepaintingVerified: boolean;
+  setupBreakdown: BacktestSetupStats[];
+  equityCurve: BacktestEquityPoint[];
+  trades: BacktestTrade[];
+}
+
+export interface AIBacktestReview {
+  model: string;
+  reviewedAt: string;
+  verdict: 'Strong Edge' | 'Moderate Edge' | 'Needs Filtering';
+  summary: string;
+  bestPerformingPattern: string;
+  keyWeakness: string;
+  recommendations: string[];
+}
+
+

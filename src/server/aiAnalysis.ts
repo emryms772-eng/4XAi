@@ -1,7 +1,9 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { TIMEFRAMES, getInstrumentBySymbol } from '../config/instruments.ts';
 import type {
+  AIBacktestReview,
   AIPriceActionSignal,
+  BacktestResult,
   OHLCVCandle,
   PriceActionAnalysisSummary,
   Timeframe,
@@ -481,4 +483,246 @@ export async function generatePriceActionSignal(params: {
   });
 
   return signal;
+}
+
+interface RawBacktestReviewJSON {
+  verdict: 'Strong Edge' | 'Moderate Edge' | 'Needs Filtering';
+  summary: string;
+  bestPerformingPattern: string;
+  keyWeakness: string;
+  recommendations: string[];
+}
+
+async function runGeminiBacktestReview(
+  ai: GoogleGenAI,
+  model: string,
+  systemInstruction: string,
+  payloadJson: string
+): Promise<RawBacktestReviewJSON> {
+  const response = await ai.models.generateContent({
+    model,
+    contents: `Audit this strictly causal, non-repainting pure price-action backtest and return structured findings:\n${payloadJson}`,
+    config: {
+      systemInstruction,
+      ...(model === PRIMARY_MODEL
+        ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+        : {}),
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          verdict: {
+            type: Type.STRING,
+            description:
+              'Edge verdict: Strong Edge, Moderate Edge, or Needs Filtering.',
+          },
+          summary: {
+            type: Type.STRING,
+            description:
+              '2-3 concise sentences evaluating win rate, profit factor, expectancy R, and drawdown.',
+          },
+          bestPerformingPattern: {
+            type: Type.STRING,
+            description:
+              'Which price-action setup or trigger showed the strongest net R performance.',
+          },
+          keyWeakness: {
+            type: Type.STRING,
+            description:
+              'Primary structural weakness, loss clustering, or drawdown driver observed in the ledger.',
+          },
+          recommendations: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description:
+              '3 actionable pure price-action refinements (e.g., HTF alignment, liquidity sweep filter, session timing). Never mention lagging indicators.',
+          },
+        },
+        required: [
+          'verdict',
+          'summary',
+          'bestPerformingPattern',
+          'keyWeakness',
+          'recommendations',
+        ],
+      },
+    },
+  });
+
+  const rawText = (response.text ?? '').trim();
+  if (!rawText) {
+    throw new Error(`Model ${model} returned an empty backtest audit.`);
+  }
+  return JSON.parse(rawText) as RawBacktestReviewJSON;
+}
+
+async function runGroqBacktestReview(
+  groqApiKey: string,
+  systemInstruction: string,
+  payloadJson: string
+): Promise<RawBacktestReviewJSON> {
+  const schemaPrompt = `${systemInstruction}
+
+Return ONLY valid JSON matching this exact shape:
+{
+  "verdict": "Strong Edge" | "Moderate Edge" | "Needs Filtering",
+  "summary": "string",
+  "bestPerformingPattern": "string",
+  "keyWeakness": "string",
+  "recommendations": ["string", "string", "string"]
+}`;
+
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${groqApiKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_FALLBACK_MODEL,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: schemaPrompt },
+        {
+          role: 'user',
+          content: `Audit this causal pure price-action backtest:\n${payloadJson}`,
+        },
+      ],
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Groq backtest audit failed (${res.status}): ${errText}`);
+  }
+
+  const json = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  const content = json.choices?.[0]?.message?.content?.trim();
+  if (!content) {
+    throw new Error('Groq returned an empty backtest audit response.');
+  }
+  return JSON.parse(content) as RawBacktestReviewJSON;
+}
+
+export async function generateBacktestReview(
+  backtest: BacktestResult
+): Promise<AIBacktestReview> {
+  const geminiKey = getGeminiApiKey();
+  const groqKey = getGroqApiKey();
+
+  if (!geminiKey && !groqKey) {
+    throw new Error(
+      'No AI API key configured. Add GEMINI_API_KEY (or optional GROQ_API_KEY) in Settings > Secrets or Vercel Environment Variables.'
+    );
+  }
+
+  const payloadJson = JSON.stringify({
+    symbol: backtest.symbol,
+    timeframe: backtest.timeframe,
+    barsTested: backtest.barsTested,
+    nonRepaintingVerified: backtest.nonRepaintingVerified,
+    initialCapital: backtest.initialCapital,
+    finalEquity: backtest.finalEquity,
+    netReturnUsd: backtest.netReturnUsd,
+    netReturnPct: backtest.netReturnPct,
+    totalTrades: backtest.totalTrades,
+    wins: backtest.wins,
+    losses: backtest.losses,
+    breakevens: backtest.breakevens,
+    winRatePct: backtest.winRatePct,
+    profitFactor: backtest.profitFactor,
+    expectancyR: backtest.expectancyR,
+    maxDrawdownPct: backtest.maxDrawdownPct,
+    setupBreakdown: backtest.setupBreakdown,
+    recentTradesSample: backtest.trades.slice(0, 18).map((t) => ({
+      side: t.side,
+      setupType: t.setupType,
+      trigger: t.trigger,
+      exitReason: t.exitReason,
+      tp1Hit: t.tp1Hit,
+      rMultiple: t.rMultiple,
+      pnlUsd: t.pnlUsd,
+    })),
+  });
+
+  const systemInstruction = [
+    'You are an institutional quantitative price-action auditor.',
+    'Review the causal, non-repainting historical backtest results (closed-bar signals, next-bar Open execution, 50% TP1 partial + Breakeven stop, conservative SL-first intrabar simulation).',
+    'CRITICAL RULE: Pure price action only — NEVER suggest or mention lagging indicators like RSI, MACD, EMA, SMA, Stochastics, or Bollinger Bands.',
+    'Evaluate statistical quality objectively: profit factor, expectancy R, drawdown, and setup breakdown.',
+    'Classify verdict strictly as one of: "Strong Edge", "Moderate Edge", or "Needs Filtering".',
+    'Provide 3 specific, actionable pure price-action filtering recommendations (e.g., higher-timeframe bias alignment, liquidity sweep confirmation, discount/premium filtering).',
+  ].join(' ');
+
+  let parsed: RawBacktestReviewJSON | null = null;
+  let usedModel = PRIMARY_MODEL;
+  let lastError: unknown = null;
+
+  if (geminiKey) {
+    const ai = createGeminiClient(geminiKey);
+    try {
+      parsed = await runGeminiBacktestReview(
+        ai,
+        PRIMARY_MODEL,
+        systemInstruction,
+        payloadJson
+      );
+      usedModel = PRIMARY_MODEL;
+    } catch (err) {
+      lastError = err;
+      if (isQuotaError(err)) {
+        try {
+          parsed = await runGeminiBacktestReview(
+            ai,
+            FALLBACK_MODEL,
+            systemInstruction,
+            payloadJson
+          );
+          usedModel = FALLBACK_MODEL;
+        } catch (fallbackErr) {
+          lastError = fallbackErr;
+        }
+      }
+    }
+  }
+
+  if (!parsed && groqKey && (lastError === null || isQuotaError(lastError))) {
+    try {
+      parsed = await runGroqBacktestReview(
+        groqKey,
+        systemInstruction,
+        payloadJson
+      );
+      usedModel = GROQ_FALLBACK_MODEL;
+    } catch (groqErr) {
+      lastError = groqErr;
+    }
+  }
+
+  if (!parsed) {
+    throw formatProviderError(lastError);
+  }
+
+  const normalizedVerdict: AIBacktestReview['verdict'] =
+    parsed.verdict === 'Strong Edge' ||
+    parsed.verdict === 'Moderate Edge' ||
+    parsed.verdict === 'Needs Filtering'
+      ? parsed.verdict
+      : backtest.profitFactor >= 1.5 && backtest.expectancyR > 0.25
+      ? 'Strong Edge'
+      : backtest.profitFactor >= 1.1
+      ? 'Moderate Edge'
+      : 'Needs Filtering';
+
+  return {
+    model: usedModel,
+    reviewedAt: new Date().toISOString(),
+    verdict: normalizedVerdict,
+    summary: parsed.summary,
+    bestPerformingPattern: parsed.bestPerformingPattern,
+    keyWeakness: parsed.keyWeakness,
+    recommendations: (parsed.recommendations ?? []).slice(0, 4),
+  };
 }
