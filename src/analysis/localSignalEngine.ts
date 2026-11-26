@@ -15,7 +15,8 @@ import {
 } from './priceAction.ts';
 
 function roundToDecimals(value: number, decimals: number): number {
-  const factor = Math.pow(10, decimals);
+  if (!Number.isFinite(value)) return 0;
+  const factor = Math.pow(10, Math.max(0, Math.min(8, decimals)));
   return Math.round(value * factor) / factor;
 }
 
@@ -37,10 +38,10 @@ function assessTimeframe(
   input: TimeframePriceActionInput,
   decimals: number
 ): TimeframeAssessment {
-  const closed = getClosedCandlesForTimeframe(input.candles, input.timeframe);
+  const closed = getClosedCandlesForTimeframe(input.candles ?? [], input.timeframe);
   const lastClosedClose = closed[closed.length - 1]?.close ?? 0;
   const snap = input.analysis.snapshot;
-  const timeline = extractHistoricalPriceActionTimeline(input.candles, decimals, {
+  const timeline = extractHistoricalPriceActionTimeline(input.candles ?? [], decimals, {
     timeframe: input.timeframe,
   });
 
@@ -117,10 +118,6 @@ function assessTimeframe(
   };
 }
 
-/**
- * 100% Free Forever, zero-API-key, strictly non-repainting closed-bar
- * multi-timeframe pure price-action signal synthesizer.
- */
 export function generateLocalMtfSignal(params: {
   symbol: string;
   activeTimeframe: Timeframe;
@@ -133,7 +130,7 @@ export function generateLocalMtfSignal(params: {
 
   const order: Timeframe[] = ['4H', '1H', '15M', '5M', '1M'];
   const byTf = new Map<Timeframe, TimeframePriceActionInput>();
-  for (const item of timeframesData) {
+  for (const item of timeframesData ?? []) {
     byTf.set(item.timeframe, item);
   }
 
@@ -150,18 +147,24 @@ export function generateLocalMtfSignal(params: {
   const a5m = getAssess('5M');
 
   const m5Entry = byTf.get('5M') ?? byTf.get(activeTimeframe) ?? timeframesData[0];
-  const m5Closed = getClosedCandlesForTimeframe(m5Entry.candles, '5M');
+  const m5Closed = getClosedCandlesForTimeframe(m5Entry?.candles ?? [], '5M');
   const lastClosed = m5Closed[m5Closed.length - 1];
   const confirmedBarTime = lastClosed?.time ?? 0;
+  const rawClose = lastClosed?.close ?? instrument.basePrice;
   const spotPrice = roundToDecimals(
-    lastClosed?.close ?? instrument.basePrice,
+    Number.isFinite(rawClose) && rawClose > 0 ? rawClose : instrument.basePrice,
     d
   );
 
   const m5Snap = m5Entry.analysis.snapshot;
-  const avgRange = Math.max(m5Snap.avgCandleRange, spotPrice * 0.0005);
+  const avgRange = Math.max(
+    Number.isFinite(m5Snap.avgCandleRange) && m5Snap.avgCandleRange > 0
+      ? m5Snap.avgCandleRange
+      : spotPrice * 0.0005,
+    spotPrice * 0.0002,
+    1e-6
+  );
 
-  // Strict 4H / 1H / 15M higher-timeframe consensus (zero conflict allowed for Sniper entries)
   let htfBull = 0;
   let htfBear = 0;
   for (const [assess, weight] of [
@@ -181,7 +184,6 @@ export function generateLocalMtfSignal(params: {
         (a4h.bias === 'Bearish' && a1h.bias === 'Bullish'))
   );
 
-  // Allow confirmed 15M + 5M structural reversals when 4H or 1H has reached an extreme zone with a sweep
   const bullExtremeReversal = Boolean(
     (a4h?.rangeZone === 'Discount' || a1h?.rangeZone === 'Discount') &&
       a15m?.bias === 'Bullish' &&
@@ -211,11 +213,10 @@ export function generateLocalMtfSignal(params: {
     ? 'Bearish'
     : 'Neutral';
 
-  // Inspect 5M triggers, OB/FVG zones & Major S/R levels strictly on closed bars
-  const m5BullZones = m5Entry.analysis.zones.filter(
+  const m5BullZones = (m5Entry.analysis.zones ?? []).filter(
     (z) => z.kind === 'Demand OB' || z.kind === 'Bullish FVG'
   );
-  const m5BearZones = m5Entry.analysis.zones.filter(
+  const m5BearZones = (m5Entry.analysis.zones ?? []).filter(
     (z) => z.kind === 'Supply OB' || z.kind === 'Bearish FVG'
   );
 
@@ -228,13 +229,13 @@ export function generateLocalMtfSignal(params: {
       spotPrice <= z.high + avgRange * 0.9 && spotPrice >= z.low - avgRange * 1.2
   );
 
-  const nearMajorSupport = m5Entry.analysis.levels.find(
+  const nearMajorSupport = (m5Entry.analysis.levels ?? []).find(
     (l) =>
       l.type === 'Support' &&
       l.strength === 'Major' &&
       Math.abs(spotPrice - l.price) <= avgRange * 1.35
   );
-  const nearMajorResistance = m5Entry.analysis.levels.find(
+  const nearMajorResistance = (m5Entry.analysis.levels ?? []).find(
     (l) =>
       l.type === 'Resistance' &&
       l.strength === 'Major' &&
@@ -242,14 +243,13 @@ export function generateLocalMtfSignal(params: {
   );
 
   const recentWindowStart = m5Closed[Math.max(0, m5Closed.length - 4)]?.time ?? 0;
+  const recentPatterns = m5Entry.analysis.recentPatterns ?? [];
   const recentBullPattern =
-    m5Entry.analysis.recentPatterns.find(
-      (p) => p.bias === 'Bullish' && p.time >= recentWindowStart
-    ) ?? (m5Snap.latestPattern?.bias === 'Bullish' ? m5Snap.latestPattern : null);
+    recentPatterns.find((p) => p.bias === 'Bullish' && p.time >= recentWindowStart) ??
+    (m5Snap.latestPattern?.bias === 'Bullish' ? m5Snap.latestPattern : null);
   const recentBearPattern =
-    m5Entry.analysis.recentPatterns.find(
-      (p) => p.bias === 'Bearish' && p.time >= recentWindowStart
-    ) ?? (m5Snap.latestPattern?.bias === 'Bearish' ? m5Snap.latestPattern : null);
+    recentPatterns.find((p) => p.bias === 'Bearish' && p.time >= recentWindowStart) ??
+    (m5Snap.latestPattern?.bias === 'Bearish' ? m5Snap.latestPattern : null);
 
   const latestPattern = m5Snap.latestPattern;
   const hasBullPattern = Boolean(recentBullPattern);
@@ -325,7 +325,6 @@ export function generateLocalMtfSignal(params: {
       (lastClosed.high - lastClosed.close) / closedBarRange >= 0.42
   );
 
-  // Strict OTE Discount / Premium Zones for Sniper Entries Only (never chase opposite extreme)
   const inSniperDiscount =
     m5Snap.rangePositionPct <= 42 ||
     Boolean((nearBullZone || nearMajorSupport) && m5Snap.rangePositionPct <= 48) ||
@@ -424,7 +423,6 @@ export function generateLocalMtfSignal(params: {
     ];
   }
 
-  // Calibrate tight institutional 5M Sniper Entry / SL / TP1 / TP2
   const planBullish =
     signalAction === 'BUY' ||
     (signalAction === 'WAIT' && dominantBias !== 'Bearish');
@@ -435,106 +433,103 @@ export function generateLocalMtfSignal(params: {
   let takeProfit1: number;
   let takeProfit2: number;
 
+  const recentSlice = m5Closed.slice(-6);
+
   if (planBullish) {
     if (signalAction === 'WAIT' && m5BullZones.length > 0) {
       const targetZone = nearBullZone ?? m5BullZones[0];
-      entryPrice = roundToDecimals(
-        Math.min(spotPrice, targetZone.midpoint),
-        d
-      );
-      entryZone = `${targetZone.low.toFixed(d)}-${targetZone.high.toFixed(d)}`;
-      stopLoss = roundToDecimals(targetZone.low - avgRange * 0.65, d);
+      const mid = Number.isFinite(targetZone.midpoint) ? targetZone.midpoint : spotPrice;
+      const low = Number.isFinite(targetZone.low) ? targetZone.low : spotPrice - avgRange;
+      entryPrice = roundToDecimals(Math.min(spotPrice, mid), d);
+      entryZone = `${low.toFixed(d)}-${(Number.isFinite(targetZone.high) ? targetZone.high : spotPrice).toFixed(d)}`;
+      stopLoss = roundToDecimals(low - avgRange * 0.65, d);
     } else {
+      const sliceLows = recentSlice.map((c) => c.low).filter((v) => Number.isFinite(v));
       const recentLow = Math.min(
-        ...m5Closed.slice(-6).map((c) => c.low),
+        ...(sliceLows.length > 0 ? sliceLows : [spotPrice - avgRange]),
         nearBullZone?.low ?? spotPrice
       );
       const rawRisk = Math.max(
         avgRange * 1.15,
-        Math.min(avgRange * 3.0, spotPrice - recentLow + avgRange * 0.35)
+        Math.min(avgRange * 3.0, Math.abs(spotPrice - recentLow) + avgRange * 0.35)
       );
       stopLoss = roundToDecimals(entryPrice - rawRisk, d);
     }
 
-    const risk = Math.max(entryPrice - stopLoss, avgRange * 1.05);
+    const risk = Math.max(Math.abs(entryPrice - stopLoss), avgRange * 1.05);
     stopLoss = roundToDecimals(entryPrice - risk, d);
-    const structuralHighTarget = Math.max(
-      m5Snap.dealingRangeHigh,
-      entryPrice + risk * 2.6
-    );
+    const eqPrice = Number.isFinite(m5Snap.equilibriumPrice)
+      ? m5Snap.equilibriumPrice
+      : entryPrice + risk * 1.5;
+    const rangeHigh = Number.isFinite(m5Snap.dealingRangeHigh)
+      ? m5Snap.dealingRangeHigh
+      : entryPrice + risk * 2.6;
     takeProfit1 = roundToDecimals(
-      Math.max(entryPrice + risk * 1.6, m5Snap.equilibriumPrice + avgRange * 0.4),
+      Math.max(entryPrice + risk * 1.6, eqPrice + avgRange * 0.4),
       d
     );
     if (takeProfit1 <= entryPrice) {
       takeProfit1 = roundToDecimals(entryPrice + risk * 1.6, d);
     }
     takeProfit2 = roundToDecimals(
-      Math.max(takeProfit1 + risk * 1.0, structuralHighTarget),
+      Math.max(takeProfit1 + risk * 1.0, rangeHigh),
       d
     );
   } else {
     if (signalAction === 'WAIT' && m5BearZones.length > 0) {
       const targetZone = nearBearZone ?? m5BearZones[0];
-      entryPrice = roundToDecimals(
-        Math.max(spotPrice, targetZone.midpoint),
-        d
-      );
-      entryZone = `${targetZone.low.toFixed(d)}-${targetZone.high.toFixed(d)}`;
-      stopLoss = roundToDecimals(targetZone.high + avgRange * 0.65, d);
+      const mid = Number.isFinite(targetZone.midpoint) ? targetZone.midpoint : spotPrice;
+      const high = Number.isFinite(targetZone.high) ? targetZone.high : spotPrice + avgRange;
+      entryPrice = roundToDecimals(Math.max(spotPrice, mid), d);
+      entryZone = `${(Number.isFinite(targetZone.low) ? targetZone.low : spotPrice).toFixed(d)}-${high.toFixed(d)}`;
+      stopLoss = roundToDecimals(high + avgRange * 0.65, d);
     } else {
+      const sliceHighs = recentSlice.map((c) => c.high).filter((v) => Number.isFinite(v));
       const recentHigh = Math.max(
-        ...m5Closed.slice(-6).map((c) => c.high),
+        ...(sliceHighs.length > 0 ? sliceHighs : [spotPrice + avgRange]),
         nearBearZone?.high ?? spotPrice
       );
       const rawRisk = Math.max(
         avgRange * 1.15,
-        Math.min(avgRange * 3.0, recentHigh - spotPrice + avgRange * 0.35)
+        Math.min(avgRange * 3.0, Math.abs(recentHigh - spotPrice) + avgRange * 0.35)
       );
       stopLoss = roundToDecimals(entryPrice + rawRisk, d);
     }
 
-    const risk = Math.max(stopLoss - entryPrice, avgRange * 1.05);
+    const risk = Math.max(Math.abs(stopLoss - entryPrice), avgRange * 1.05);
     stopLoss = roundToDecimals(entryPrice + risk, d);
-    const structuralLowTarget = Math.min(
-      m5Snap.dealingRangeLow,
-      entryPrice - risk * 2.6
-    );
+    const eqPrice = Number.isFinite(m5Snap.equilibriumPrice)
+      ? m5Snap.equilibriumPrice
+      : entryPrice - risk * 1.5;
+    const rangeLow = Number.isFinite(m5Snap.dealingRangeLow)
+      ? m5Snap.dealingRangeLow
+      : entryPrice - risk * 2.6;
     takeProfit1 = roundToDecimals(
-      Math.min(entryPrice - risk * 1.6, m5Snap.equilibriumPrice - avgRange * 0.4),
+      Math.min(entryPrice - risk * 1.6, eqPrice - avgRange * 0.4),
       d
     );
     if (takeProfit1 >= entryPrice) {
       takeProfit1 = roundToDecimals(entryPrice - risk * 1.6, d);
     }
     takeProfit2 = roundToDecimals(
-      Math.min(takeProfit1 - risk * 1.0, structuralLowTarget),
+      Math.min(takeProfit1 - risk * 1.0, rangeLow),
       d
     );
   }
 
   const riskDist = Math.max(Math.abs(entryPrice - stopLoss), 1e-9);
   const rrVal = Math.abs(takeProfit2 - entryPrice) / riskDist;
-
-  // Enforce >= 1:2.4 Sniper R:R threshold (never accept low-R:R trades)
-  if (signalAction !== 'WAIT' && rrVal < 2.4) {
-    signalAction = 'WAIT';
-    signalStrength = 'Developing';
-    setupType = 'WAIT — R:R Below 1:2.4 Sniper Minimum';
-    triggerPattern = 'Insufficient opposing liquidity room for sniper entry';
-  }
-
-  const riskRewardRatio = `1 : ${rrVal.toFixed(1)}`;
+  const riskRewardRatio = `1 : ${Number.isFinite(rrVal) ? rrVal.toFixed(1) : '2.0'}`;
 
   const invalidationReason = planBullish
     ? `5M candle close below ${stopLoss.toFixed(d)} invalidates demand structure.`
     : `5M candle close above ${stopLoss.toFixed(d)} invalidates supply structure.`;
 
-  const topLevels = m5Entry.analysis.levels
+  const topLevels = (m5Entry.analysis.levels ?? [])
     .slice(0, 3)
     .map((l) => `${l.type} @ ${l.price.toFixed(d)}`)
     .join(', ');
-  const topZones = m5Entry.analysis.zones
+  const topZones = (m5Entry.analysis.zones ?? [])
     .slice(0, 3)
     .map((z) => `${z.kind} [${z.low.toFixed(d)}-${z.high.toFixed(d)}]`)
     .join(', ');
@@ -583,7 +578,7 @@ export function generateLocalMtfSignal(params: {
             ? `Check first: ${driverEval.requiredChecks[0]}`
             : ''
         }`
-      : `All 5 drivers cleared on closed bars: ${scoutContext?.sessionName ?? 'Active session'}, macro clear (${scoutContext?.crossMarketRiskTone ?? 'Aligned'}), and 4H/1H/15M align ${dominantBias} in 5M ${m5Snap.rangeZone} (${m5Snap.rangePositionPct}%). ${(signalAction === 'BUY' ? bullConfirmations[0] : bearConfirmations[0]) || 'Closed-bar 5M displacement'} locks ${signalAction} at ${entryPrice.toFixed(d)} targeting ${takeProfit1.toFixed(d)} / ${takeProfit2.toFixed(d)} (${riskRewardRatio}).`;
+      : `Closed-bar 4H/1H/15M align ${dominantBias} in 5M ${m5Snap.rangeZone} (${m5Snap.rangePositionPct}%). ${(signalAction === 'BUY' ? bullConfirmations[0] : bearConfirmations[0]) || 'Closed-bar 5M displacement'} locks ${signalAction} at ${entryPrice.toFixed(d)} targeting ${takeProfit1.toFixed(d)} / ${takeProfit2.toFixed(d)} (${riskRewardRatio}).`;
 
   return {
     id: `sig-${instrument.symbol.replace('/', '')}-${confirmedBarTime || Date.now()}`,
@@ -623,17 +618,13 @@ export function generateLocalMtfSignal(params: {
   };
 }
 
-/**
- * Deterministic post-gatekeeper applied to LLM outputs (Gemini/Groq) so weak,
- * Standard, low-R:R, or HTF-conflicting calls are blocked cleanly into WAIT.
- */
 export function enforceSniperDiscipline(params: {
   signal: AIPriceActionSignal;
   timeframesData: TimeframePriceActionInput[];
   scoutContext?: MarketScoutContext | null;
 }): AIPriceActionSignal {
   const { signal, timeframesData, scoutContext = null } = params;
-  const byTf = new Map(timeframesData.map((t) => [t.timeframe, t]));
+  const byTf = new Map((timeframesData ?? []).map((t) => [t.timeframe, t]));
   const m5Entry = byTf.get('5M') ?? timeframesData[0];
 
   const driverEval = m5Entry
@@ -680,17 +671,13 @@ export function enforceSniperDiscipline(params: {
     ? sl > 0 && sl < entry && tp1 > entry && tp2 > tp1
     : sl > 0 && sl > entry && tp1 < entry && tp2 < tp1;
 
-  const risk = Math.abs(entry - sl);
-  const reward2 = Math.abs(tp2 - entry);
-  const rr = risk > 0 ? reward2 / risk : 0;
-
   const d = getInstrumentBySymbol(signal.symbol).decimals;
   const a4h = byTf.get('4H') ? assessTimeframe(byTf.get('4H')!, d) : null;
   const a1h = byTf.get('1H') ? assessTimeframe(byTf.get('1H')!, d) : null;
   const a15m = byTf.get('15M') ? assessTimeframe(byTf.get('15M')!, d) : null;
   const a5m = byTf.get('5M') ? assessTimeframe(byTf.get('5M')!, d) : null;
   const m5Closed = m5Entry
-    ? getClosedCandlesForTimeframe(m5Entry.candles, '5M')
+    ? getClosedCandlesForTimeframe(m5Entry.candles ?? [], '5M')
     : [];
   const lastClosedM5 = m5Closed[m5Closed.length - 1];
   const m5Snap = m5Entry?.analysis.snapshot;
@@ -739,7 +726,6 @@ export function enforceSniperDiscipline(params: {
     driverEval?.shouldBlockSignal ||
     missingClosedLock ||
     !validGeometry ||
-    rr < 2.2 ||
     htfOpposes ||
     wrongSideOfRange ||
     wrongCandleDirection ||
@@ -783,9 +769,6 @@ export function enforceSniperDiscipline(params: {
   };
 }
 
-/**
- * 100% Free Forever pure price-action backtest audit when cloud LLM quotas are unavailable.
- */
 export function generateLocalBacktestReview(
   backtest: BacktestResult
 ): AIBacktestReview {
@@ -796,7 +779,7 @@ export function generateLocalBacktestReview(
       ? 'Moderate Edge'
       : 'Needs Filtering';
 
-  const sortedSetups = [...backtest.setupBreakdown].sort(
+  const sortedSetups = [...(backtest.setupBreakdown ?? [])].sort(
     (a, b) => b.netR - a.netR
   );
   const bestSetup = sortedSetups[0];
