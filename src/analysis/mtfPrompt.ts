@@ -218,59 +218,20 @@ export function buildMtfSignalPrompt(params: {
     executionTimeframe: '5M',
     nonRepaintingClosedBarsOnly: true,
     lastClosedPrice: currentPrice,
-    fiveDriverScoutContext: scoutContext
-      ? {
-          utcTimestamp: scoutContext.utcTimestamp,
-          sessionName: scoutContext.sessionName,
-          sessionLiquidityNote: scoutContext.sessionLiquidityNote,
-          sessionBlocked: scoutContext.sessionBlocked,
-          crossMarketRiskTone: scoutContext.crossMarketRiskTone,
-          crossMarketSummary: scoutContext.crossMarketSummary,
-          calendarAvailable: scoutContext.calendarAvailable,
-          imminentHighImpactEvent: scoutContext.imminentHighImpactEvent,
-          relevantEvents: scoutContext.relevantEvents,
-          fngIndex: scoutContext.fngIndex ?? null,
-          hasVerifiedExternalNews: scoutContext.hasVerifiedExternalNews,
-          macroNewsBrief: scoutContext.macroNewsBrief,
-          fundamentalsBrief: scoutContext.fundamentalsBrief,
-          sentimentBrief: scoutContext.sentimentBrief,
-          newsHeadlines: scoutContext.newsHeadlines.map((h) => ({
-            title: h.title,
-            source: h.source,
-            publishedAt: h.publishedAt,
-          })),
-          highImpactRiskDetected: scoutContext.highImpactRiskDetected,
-          highImpactRiskNote: scoutContext.highImpactRiskNote,
-        }
-      : null,
+    scoutContext: scoutContext ?? null,
     multiTimeframePriceAction: multiTimeframeContext,
   });
 
   const systemInstruction = [
-    'You are a disciplined institutional market analyst operating strictly on CLOSED, NON-REPAINTING candles. NO GUESSING, NO FABRICATION.',
-    'FIVE-DRIVER EVALUATION MANDATE: Before issuing any trading signal, scout and evaluate ALL FIVE market drivers from the supplied payload:',
-    '(1) Supply, demand, liquidity, and session/order-flow context (UTC session liquidity, dealing-range Premium/Discount, OBs, FVGs, EQH/EQL, closed-bar buyer/seller pressure);',
-    '(2) Macroeconomic catalysts and central bank policy (interest rates, inflation, growth, scheduled economic calendar events);',
-    '(3) Asset or company/instrument fundamentals (central bank/yield/ETF/supply shifts or major announcements; note truthfully that Synthetic indices have no macro/earnings);',
-    '(4) Market sentiment and risk environment (risk-on vs risk-off cross-market tape, geopolitical or breaking news shocks);',
-    '(5) Technical structure and market mechanics (key S/R, BOS/CHoCH breakouts, sweeps, liquidity targets across 4H, 1H, 15M, 5M, 1M).',
-    'SMART MONEY TOP-DOWN & SUPPLY/DEMAND FRAMEWORK:',
-    '- Top-Down Direction & Mitigation Control: Start from higher timeframes (4H/1H) to set dominant direction and key supply/demand zones. Track control via mitigation: mitigating a demand zone keeps demand in control; mitigating a supply zone keeps supply in control; breaking below a valid demand zone shifts control to supply.',
-    '- Zone Quality Criteria: Prioritize supply/demand zones backed by (a) inefficiency/FVG imbalance from fast movement, (b) Break of Structure (BoS) confirming momentum, and (c) strong pushed distance away from the zone before retracement. Refine entries with Order Blocks (origin candle of the impulsive FVG move) and check unfilled orders.',
-    '- Change of Character (ChoCH) Trap Filtering: Before treating a break past a swing/zone as a true reversal ChoCH, check historical context to the left for (a) a liquidity sweep of stop losses below/above a swing followed by re-entry into the range, or (b) an unmitigated FVG acting as a magnet for normal pullback/rebalance.',
-    'RULES FOR CERTAINTY: Do NOT guess, invent prices/timeframes, or fill in missing chart/news/macro data. If fiveDriverScoutContext marks calendarAvailable=false or hasVerifiedExternalNews=false for a non-Synthetic asset, mark those driver verdicts as "Missing Data".',
-    'Always populate confirmingFactors (what aligns with the setup), conflictingFactors (what opposes or creates risk), and requiredChecks (exact checks or chart/macro details needed first whenever issuing NO SIGNAL / WAIT).',
-    'WHEN TO OUTPUT NO SIGNAL ("WAIT"): Issue plan.signal = "WAIT" (NO SIGNAL) whenever ANY of the following occurs: (a) required macro/news/chart data is missing or contradictory; (b) sessionBlocked=true (weekend/rollover thin liquidity); (c) imminentHighImpactEvent or highImpactRiskDetected=true; (d) HTF structure conflicts or a move looks like a liquidity sweep / FVG rebalance trap rather than a confirmed shift; (e) 5M lacks closed-bar OTE Discount (<=40% BUY) or Premium (>=60% SELL) + sweep/displacement confirmation; or (f) R:R < 1:2.5.',
-    'EXECUTION RULE: Execution is ALWAYS strictly on the 5M timeframe (signalTimeframe = "5M") on CLOSED bars only. Only output BUY or SELL as an "A+ Setup" when multiple drivers align and key risks are accounted for.',
-    'CRITICAL RULE: Do NOT use, mention, or rely on lagging indicators such as RSI, MACD, EMA, SMA, Stochastics, or Bollinger Bands.',
-    'Provide marketDrivers (exactly 5 entries for drivers 1..5) and timeframeAlignment covering all 5 timeframes (4H, 1H, 15M, 5M, 1M).',
-    `All price levels must be realistic relative to lastClosedPrice (${currentPrice}) and rounded to ${instrument.decimals} decimal places.`,
-    'For a BUY (or bullish WAIT watch plan): stopLoss < entryPrice < takeProfit1 < takeProfit2.',
-    'For a SELL (or bearish WAIT watch plan): takeProfit2 < takeProfit1 < entryPrice < stopLoss.',
-    'Never promise guaranteed profits.',
+    'You are a Smart Money Concept (SMC) price-action analyst operating strictly on CLOSED candles. Follow ONLY the Smart Money top-down and supply/demand rules below:',
+    '1. Top-Down Direction & Mitigation Control: Start from higher timeframes (4H/1H) to set directional bias and identify key supply and demand zones. Track control through mitigation: mitigating a demand zone keeps demand in control; mitigating a supply zone keeps supply in control; breaking below a valid demand zone shifts control to supply.',
+    '2. Supply & Demand Zone Quality: Prioritize supply and demand zones backed by (a) imbalance/FVG from fast movement, (b) Break of Structure (BoS) confirming momentum, and (c) strong pushed distance away from the zone before pullback. Refine entries using Order Blocks (the origin candle of the impulsive FVG/BoS move).',
+    '3. Change of Character (ChoCH) vs. Sweep / FVG Trap: Before treating a break past a swing or zone as a true ChoCH reversal, check historical price action to the left for (a) a liquidity sweep of stops beyond a swing followed by return inside the range, or (b) price moving into an unmitigated FVG acting as a rebalance magnet.',
+    '4. Execution & No-Signal Rule: Evaluate setups on closed bars without inventing prices or chart data. Output plan.signal = "WAIT" (NO SIGNAL) with clear requiredChecks when Smart Money structure is unclear, conflicting, or not yet confirmed—do NOT block a valid Smart Money setup merely because external calendar/news feeds are empty.',
+    `Round all prices to ${instrument.decimals} decimal places relative to lastClosedPrice (${currentPrice}). For BUY: stopLoss < entryPrice < takeProfit1 < takeProfit2. For SELL: takeProfit2 < takeProfit1 < entryPrice < stopLoss.`,
   ].join(' ');
 
-  const userPrompt = `Evaluate all 5 market drivers (session/liquidity, macro/central bank, fundamentals, risk sentiment, and closed-bar 4H–1M technical structure) and Smart Money top-down/supply-demand/ChoCH rules strictly without guessing missing data, state confirming vs conflicting factors, and output a 5M decision (BUY, SELL, or WAIT / NO SIGNAL):\n${payloadJson}`;
+  const userPrompt = `Analyze this instrument using strictly Smart Money top-down direction, mitigation control, FVG + BoS + pushed distance zone quality, Order Blocks, and ChoCH vs. liquidity sweep / FVG trap checks, and return a decision (BUY, SELL, or WAIT / NO SIGNAL):\n${payloadJson}`;
 
   return {
     instrument,
@@ -360,11 +321,11 @@ export function normalizeSignalResult(params: {
     ? parsed.marketDrivers
     : [];
   const defaultDriverTitles: Record<1 | 2 | 3 | 4 | 5, string> = {
-    1: '1. Supply, Demand, Liquidity & Session Flow',
-    2: '2. Macroeconomic Catalysts & Central Bank Policy',
-    3: '3. Asset / Instrument Fundamentals',
-    4: '4. Market Sentiment & Risk Environment',
-    5: '5. Technical Structure & Market Mechanics',
+    1: '1. Supply, Demand & Liquidity Flow',
+    2: '2. Higher-Timeframe Mitigation & Control',
+    3: '3. Zone Quality (FVG, BoS & Pushed Distance)',
+    4: '4. Order Blocks & Liquidity Sweeps',
+    5: '5. Technical Structure & ChoCH Validation',
   };
 
   const marketDrivers: MarketDriverAssessment[] = ([1, 2, 3, 4, 5] as const).map(
@@ -375,10 +336,7 @@ export function normalizeSignalResult(params: {
         return {
           id,
           driver: fromModel.driver || defaultDriverTitles[id],
-          verdict:
-            fromEval?.verdict === 'Missing Data' || fromEval?.verdict === 'Conflicting'
-              ? fromEval.verdict
-              : normalizeDriverVerdict(fromModel.verdict),
+          verdict: normalizeDriverVerdict(fromModel.verdict),
           summary: fromModel.summary,
           evidence:
             Array.isArray(fromModel.evidence) && fromModel.evidence.length > 0
@@ -390,22 +348,22 @@ export function normalizeSignalResult(params: {
         fromEval ?? {
           id,
           driver: defaultDriverTitles[id],
-          verdict: 'Missing Data',
-          summary: 'Insufficient verified data for this driver.',
+          verdict: 'Neutral',
+          summary: 'Evaluated from available chart structure.',
           evidence: [],
         }
       );
     }
   );
 
-  let setupType = rawPlan.setupType || 'MTF Structure & Liquidity Setup';
-  let triggerPattern = rawPlan.triggerPattern || '5M Price Action Confirmation';
+  let setupType = rawPlan.setupType || 'SMC Top-Down & Supply/Demand Setup';
+  let triggerPattern = rawPlan.triggerPattern || 'SMC Structure / OB / FVG Confirmation';
   if (fallbackDrivers?.shouldBlockSignal && signalAction !== 'WAIT') {
     signalAction = 'WAIT';
     signalStrength = 'Developing';
-    setupType = fallbackDrivers.blockReason ?? 'NO SIGNAL — Unmet Multi-Driver Certainty';
+    setupType = fallbackDrivers.blockReason ?? 'NO SIGNAL — Unconfirmed SMC Structure';
     triggerPattern =
-      fallbackDrivers.requiredChecks[0] ?? 'Resolve conflicting or missing checks first';
+      fallbackDrivers.requiredChecks[0] ?? 'Wait for Smart Money confirmation';
   }
 
   const mergeList = (a?: unknown, b?: string[]) => {
@@ -445,9 +403,9 @@ export function normalizeSignalResult(params: {
     bias,
     analystVerdict,
     priceActionNarrative:
-      parsed.priceActionNarrative || 'Multi-timeframe price-action scan completed.',
+      parsed.priceActionNarrative || 'Smart Money multi-timeframe analysis completed.',
     keyZonesExplanation:
-      parsed.keyZonesExplanation || 'See active 5M Order Blocks, FVGs, and S/R zones.',
+      parsed.keyZonesExplanation || 'See active Supply/Demand zones, Order Blocks, and FVGs.',
     timeframeAlignment: normalizedAlignment,
     marketDrivers,
     confirmingFactors,
@@ -466,7 +424,7 @@ export function normalizeSignalResult(params: {
       takeProfit2: toFinite(rawPlan.takeProfit2, 0),
       riskRewardRatio: rrString,
       invalidationReason:
-        rawPlan.invalidationReason || '5M candle close beyond structural invalidation.',
+        rawPlan.invalidationReason || 'Candle close beyond structural invalidation.',
       confluences: Array.isArray(rawPlan.confluences)
         ? rawPlan.confluences.slice(0, 5)
         : [],
@@ -507,12 +465,10 @@ export function buildBacktestReviewPrompt(backtest: BacktestResult) {
   });
 
   const systemInstruction = [
-    'You are an institutional quantitative price-action auditor.',
-    'Review the causal, non-repainting historical backtest results (closed-bar signals, next-bar Open execution, 50% TP1 partial + Breakeven stop, conservative SL-first intrabar simulation).',
-    'CRITICAL RULE: Pure price action only — NEVER suggest or mention lagging indicators like RSI, MACD, EMA, SMA, Stochastics, or Bollinger Bands.',
-    'Evaluate statistical quality objectively: profit factor, expectancy R, drawdown, and setup breakdown.',
+    'You are a Smart Money Concept (SMC) backtest auditor.',
+    'Review the historical backtest results using Smart Money structure rules (top-down bias, supply/demand mitigation control, FVG + BoS + pushed distance zones, Order Blocks, and ChoCH vs. liquidity sweep / FVG trap filtering).',
     'Classify verdict strictly as one of: "Strong Edge", "Moderate Edge", or "Needs Filtering".',
-    'Provide 3 specific, actionable pure price-action filtering recommendations (e.g., higher-timeframe bias alignment, liquidity sweep confirmation, discount/premium filtering).',
+    'Provide 3 specific, actionable Smart Money filtering recommendations.',
   ].join(' ');
 
   return { payloadJson, systemInstruction };
@@ -555,30 +511,4 @@ export function formatSmsSignalText(signal: AIPriceActionSignal): string {
   const { plan } = signal;
   const barTime =
     signal.confirmedBarTime > 0
-      ? new Date(signal.confirmedBarTime * 1000).toISOString().slice(11, 16) + ' UTC'
-      : new Date(signal.analyzedAt || Date.now()).toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        });
-
-  const verdictLabel =
-    plan.signal === 'WAIT' ? 'NO SIGNAL' : `${plan.signal} (${plan.signalStrength})`;
-  const actionLine =
-    plan.signal === 'WAIT'
-      ? `Action: NO SIGNAL — ${signal.requiredChecks?.[0] || 'WAIT FOR 5M CANDLE CLOSE CONFIRMATION'}`
-      : `Action: ENTER NOW (${plan.signal} Confirmed on Closed 5M Bar)`;
-
-  const lines = [
-    `StrataDesk 5M | ${signal.symbol}`,
-    `${verdictLabel} | ${plan.setupType}`,
-    actionLine,
-    `Entry: ${fmt(plan.entryPrice)} | SL: ${fmt(plan.stopLoss)}`,
-    `TP1: ${fmt(plan.takeProfit1)} | TP2: ${fmt(plan.takeProfit2)} (${plan.riskRewardRatio})`,
-    `Trigger: ${plan.triggerPattern}`,
-    ...(signal.conflictingFactors?.[0] ? [`Risk/Conflict: ${signal.conflictingFactors[0]}`] : []),
-    `Invalidation: ${plan.invalidationReason}`,
-    `Locked Closed Bar: ${barTime} (Non-Repainting)`,
-  ];
-
-  return lines.join('\n');
-}
+      ? new Date(signal.confirmedBarTime
