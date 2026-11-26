@@ -1,3 +1,4 @@
+import { generateLocalMtfSignal } from '../../src/analysis/localSignalEngine.ts';
 import { analyzePriceAction } from '../../src/analysis/priceAction.ts';
 import { TIMEFRAMES, getInstrumentBySymbol } from '../../src/config/instruments.ts';
 import { generatePriceActionSignal } from '../../src/server/aiAnalysis.ts';
@@ -51,17 +52,30 @@ export default async function handler(
     const timeframesData = await Promise.all(
       orderedTfs.map(async (tf) => {
         const targetLimit = tf === '5M' ? 240 : 200;
-        const serverData = await getMarketCandles(
-          instrument.symbol,
-          tf,
-          targetLimit
-        );
-        const candles =
-          serverData.candles.length >= 40
+        let serverCandles: OHLCVCandle[] = [];
+
+        try {
+          const serverData = await getMarketCandles(
+            instrument.symbol,
+            tf,
+            targetLimit
+          );
+          serverCandles = Array.isArray(serverData?.candles)
             ? serverData.candles
+            : [];
+        } catch {
+          serverCandles = [];
+        }
+
+        const candles =
+          serverCandles.length >= 40
+            ? serverCandles
             : tf === activeTimeframe && clientCandles.length >= 40
             ? clientCandles
-            : serverData.candles;
+            : serverCandles.length > 0
+            ? serverCandles
+            : clientCandles;
+
         return {
           timeframe: tf,
           candles,
@@ -76,11 +90,21 @@ export default async function handler(
       timeframesData.find((t) => t.timeframe === activeTimeframe) ??
       timeframesData[0];
 
-    const signal = await generatePriceActionSignal({
-      symbol: instrument.symbol,
-      activeTimeframe,
-      timeframesData,
-    });
+    let signal;
+    try {
+      signal = await generatePriceActionSignal({
+        symbol: instrument.symbol,
+        activeTimeframe,
+        timeframesData,
+      });
+    } catch {
+      signal = generateLocalMtfSignal({
+        symbol: instrument.symbol,
+        activeTimeframe,
+        timeframesData,
+        scoutContext: null,
+      });
+    }
 
     res.status(200).json({ priceAction: activeEntry.analysis, signal });
   } catch (error) {
